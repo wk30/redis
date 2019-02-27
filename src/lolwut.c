@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009-2012, Salvatore Sanfilippo <antirez at gmail dot com>
+ * Copyright (c) 2018, Salvatore Sanfilippo <antirez at gmail dot com>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -25,37 +25,32 @@
  * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
+ *
+ * ----------------------------------------------------------------------------
+ *
+ * This file implements the LOLWUT command. The command should do something
+ * fun and interesting, and should be replaced by a new implementation at
+ * each new version of Redis.
  */
 
-#ifndef __REDIS_UTIL_H
-#define __REDIS_UTIL_H
+#include "server.h"
 
-#include <stdint.h>
-#include "sds.h"
+void lolwut5Command(client *c);
 
-/* The maximum number of characters needed to represent a long double
- * as a string (long double has a huge range).
- * This should be the size of the buffer given to ld2string */
-#define MAX_LONG_DOUBLE_CHARS 5*1024
+/* The default target for LOLWUT if no matching version was found.
+ * This is what unstable versions of Redis will display. */
+void lolwutUnstableCommand(client *c) {
+    sds rendered = sdsnew("Redis ver. ");
+    rendered = sdscat(rendered,REDIS_VERSION);
+    rendered = sdscatlen(rendered,"\n",1);
+    addReplyBulkSds(c,rendered);
+}
 
-int stringmatchlen(const char *p, int plen, const char *s, int slen, int nocase);
-int stringmatch(const char *p, const char *s, int nocase);
-int stringmatchlen_fuzz_test(void);
-long long memtoll(const char *p, int *err);
-uint32_t digits10(uint64_t v);
-uint32_t sdigits10(int64_t v);
-int ll2string(char *s, size_t len, long long value);
-int string2ll(const char *s, size_t slen, long long *value);
-int string2l(const char *s, size_t slen, long *value);
-int string2ld(const char *s, size_t slen, long double *dp);
-int d2string(char *buf, size_t len, double value);
-int ld2string(char *buf, size_t len, long double value, int humanfriendly);
-sds getAbsolutePath(char *filename);
-unsigned long getTimeZone(void);
-int pathIsBaseName(char *path);
-
-#ifdef REDIS_TEST
-int utilTest(int argc, char **argv);
-#endif
-
-#endif
+void lolwutCommand(client *c) {
+    char *v = REDIS_VERSION;
+    if ((v[0] == '5' && v[1] == '.') ||
+        (v[0] == '4' && v[1] == '.' && v[2] == '9'))
+        lolwut5Command(c);
+    else
+        lolwutUnstableCommand(c);
+}
