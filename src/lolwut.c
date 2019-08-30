@@ -1,8 +1,5 @@
-/* See endianconv.c top comments for more information
- *
- * ----------------------------------------------------------------------------
- *
- * Copyright (c) 2011-2012, Salvatore Sanfilippo <antirez at gmail dot com>
+/*
+ * Copyright (c) 2018, Salvatore Sanfilippo <antirez at gmail dot com>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -28,51 +25,32 @@
  * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
+ *
+ * ----------------------------------------------------------------------------
+ *
+ * This file implements the LOLWUT command. The command should do something
+ * fun and interesting, and should be replaced by a new implementation at
+ * each new version of Redis.
  */
 
-#ifndef __ENDIANCONV_H
-#define __ENDIANCONV_H
+#include "server.h"
 
-#include "config.h"
-#include <stdint.h>
+void lolwut5Command(client *c);
 
-void memrev16(void *p);
-void memrev32(void *p);
-void memrev64(void *p);
-uint16_t intrev16(uint16_t v);
-uint32_t intrev32(uint32_t v);
-uint64_t intrev64(uint64_t v);
+/* The default target for LOLWUT if no matching version was found.
+ * This is what unstable versions of Redis will display. */
+void lolwutUnstableCommand(client *c) {
+    sds rendered = sdsnew("Redis ver. ");
+    rendered = sdscat(rendered,REDIS_VERSION);
+    rendered = sdscatlen(rendered,"\n",1);
+    addReplyBulkSds(c,rendered);
+}
 
-/* variants of the function doing the actual conversion only if the target
- * host is big endian */
-#if (BYTE_ORDER == LITTLE_ENDIAN)
-#define memrev16ifbe(p) ((void)(0))
-#define memrev32ifbe(p) ((void)(0))
-#define memrev64ifbe(p) ((void)(0))
-#define intrev16ifbe(v) (v)
-#define intrev32ifbe(v) (v)
-#define intrev64ifbe(v) (v)
-#else
-#define memrev16ifbe(p) memrev16(p)
-#define memrev32ifbe(p) memrev32(p)
-#define memrev64ifbe(p) memrev64(p)
-#define intrev16ifbe(v) intrev16(v)
-#define intrev32ifbe(v) intrev32(v)
-#define intrev64ifbe(v) intrev64(v)
-#endif
-
-/* The functions htonu64() and ntohu64() convert the specified value to
- * network byte ordering and back. In big endian systems they are no-ops. */
-#if (BYTE_ORDER == BIG_ENDIAN)
-#define htonu64(v) (v)
-#define ntohu64(v) (v)
-#else
-#define htonu64(v) intrev64(v)
-#define ntohu64(v) intrev64(v)
-#endif
-
-#ifdef REDIS_TEST
-int endianconvTest(int argc, char *argv[]);
-#endif
-
-#endif
+void lolwutCommand(client *c) {
+    char *v = REDIS_VERSION;
+    if ((v[0] == '5' && v[1] == '.') ||
+        (v[0] == '4' && v[1] == '.' && v[2] == '9'))
+        lolwut5Command(c);
+    else
+        lolwutUnstableCommand(c);
+}
