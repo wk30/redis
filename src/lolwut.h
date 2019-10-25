@@ -1,8 +1,5 @@
-/* See endianconv.c top comments for more information
- *
- * ----------------------------------------------------------------------------
- *
- * Copyright (c) 2011-2012, Salvatore Sanfilippo <antirez at gmail dot com>
+/*
+ * Copyright (c) 2018-2019, Salvatore Sanfilippo <antirez at gmail dot com>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -30,49 +27,23 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef __ENDIANCONV_H
-#define __ENDIANCONV_H
+/* This structure represents our canvas. Drawing functions will take a pointer
+ * to a canvas to write to it. Later the canvas can be rendered to a string
+ * suitable to be printed on the screen, using unicode Braille characters. */
 
-#include "config.h"
-#include <stdint.h>
+/* This represents a very simple generic canvas in order to draw stuff.
+ * It's up to each LOLWUT versions to translate what they draw to the
+ * screen, depending on the result to accomplish. */
+typedef struct lwCanvas {
+    int width;
+    int height;
+    char *pixels;
+} lwCanvas;
 
-void memrev16(void *p);
-void memrev32(void *p);
-void memrev64(void *p);
-uint16_t intrev16(uint16_t v);
-uint32_t intrev32(uint32_t v);
-uint64_t intrev64(uint64_t v);
-
-/* variants of the function doing the actual conversion only if the target
- * host is big endian */
-#if (BYTE_ORDER == LITTLE_ENDIAN)
-#define memrev16ifbe(p) ((void)(0))
-#define memrev32ifbe(p) ((void)(0))
-#define memrev64ifbe(p) ((void)(0))
-#define intrev16ifbe(v) (v)
-#define intrev32ifbe(v) (v)
-#define intrev64ifbe(v) (v)
-#else
-#define memrev16ifbe(p) memrev16(p)
-#define memrev32ifbe(p) memrev32(p)
-#define memrev64ifbe(p) memrev64(p)
-#define intrev16ifbe(v) intrev16(v)
-#define intrev32ifbe(v) intrev32(v)
-#define intrev64ifbe(v) intrev64(v)
-#endif
-
-/* The functions htonu64() and ntohu64() convert the specified value to
- * network byte ordering and back. In big endian systems they are no-ops. */
-#if (BYTE_ORDER == BIG_ENDIAN)
-#define htonu64(v) (v)
-#define ntohu64(v) (v)
-#else
-#define htonu64(v) intrev64(v)
-#define ntohu64(v) intrev64(v)
-#endif
-
-#ifdef REDIS_TEST
-int endianconvTest(int argc, char *argv[]);
-#endif
-
-#endif
+/* Drawing functions implemented inside lolwut.c. */
+lwCanvas *lwCreateCanvas(int width, int height, int bgcolor);
+void lwFreeCanvas(lwCanvas *canvas);
+void lwDrawPixel(lwCanvas *canvas, int x, int y, int color);
+int lwGetPixel(lwCanvas *canvas, int x, int y);
+void lwDrawLine(lwCanvas *canvas, int x1, int y1, int x2, int y2, int color);
+void lwDrawSquare(lwCanvas *canvas, int x, int y, float size, float angle, int color);
