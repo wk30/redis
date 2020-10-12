@@ -28,16 +28,24 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "server.h"
+#include "redis.h"
 #include "sha1.h"   /* SHA1 is used for DEBUG DIGEST */
 #include "crc64.h"
 #include "bio.h"
+#include "object.h"
+#include "t_hash.h"
+#include "t_list.h"
+#include "t_set.h"
+#include "t_zset.h"
+#include "ziplist.h"
 
 #include <arpa/inet.h>
 #include <signal.h>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <stdlib.h>
+#include <string.h>
 
 #ifdef HAVE_BACKTRACE
 #include <execinfo.h>
@@ -244,15 +252,6 @@ void xorObjectDigest(redisDb *db, robj *keyobj, unsigned char *digest, robj *o) 
             }
         }
         streamIteratorStop(&si);
-    } else if (o->type == OBJ_MODULE) {
-        RedisModuleDigest md;
-        moduleValue *mv = o->ptr;
-        moduleType *mt = mv->type;
-        moduleInitDigestContext(md);
-        if (mt->digest) {
-            mt->digest(&md,mv->value);
-            xorDigest(digest,md.x,sizeof(md.x));
-        }
     } else {
         serverPanic("Unknown object type");
     }
@@ -378,454 +377,6 @@ void mallctl_string(client *c, robj **argv, int argc) {
 }
 #endif
 
-void debugCommand(client *c) {
-    if (c->argc == 2 && !strcasecmp(c->argv[1]->ptr,"help")) {
-        const char *help[] = {
-"ASSERT -- Crash by assertion failed.",
-"CHANGE-REPL-ID -- Change the replication IDs of the instance. Dangerous, should be used only for testing the replication subsystem.",
-"CRASH-AND-RECOVER <milliseconds> -- Hard crash and restart after <milliseconds> delay.",
-"DIGEST -- Output a hex signature representing the current DB content.",
-"DIGEST-VALUE <key-1> ... <key-N>-- Output a hex signature of the values of all the specified keys.",
-"DEBUG PROTOCOL [string|integer|double|bignum|null|array|set|map|attrib|push|verbatim|true|false]",
-"ERROR <string> -- Return a Redis protocol error with <string> as message. Useful for clients unit tests to simulate Redis errors.",
-"LOG <message> -- write message to the server log.",
-"LEAK <string> -- Create a memory leak of the input string.",
-"HTSTATS <dbid> -- Return hash table statistics of the specified Redis database.",
-"HTSTATS-KEY <key> -- Like htstats but for the hash table stored as key's value.",
-"LOADAOF -- Flush the AOF buffers on disk and reload the AOF in memory.",
-"LUA-ALWAYS-REPLICATE-COMMANDS <0|1> -- Setting it to 1 makes Lua replication defaulting to replicating single commands, without the script having to enable effects replication.",
-"OBJECT <key> -- Show low level info about key and associated value.",
-"OOM -- Crash the server simulating an out-of-memory error.",
-"PANIC -- Crash the server simulating a panic.",
-"POPULATE <count> [prefix] [size] -- Create <count> string keys named key:<num>. If a prefix is specified is used instead of the 'key' prefix.",
-"RELOAD [MERGE] [NOFLUSH] [NOSAVE] -- Save the RDB on disk and reload it back in memory. By default it will save the RDB file and load it back. With the NOFLUSH option the current database is not removed before loading the new one, but conflicts in keys will kill the server with an exception. When MERGE is used, conflicting keys will be loaded (the key in the loaded RDB file will win). When NOSAVE is used, the server will not save the current dataset in the RDB file before loading. Use DEBUG RELOAD NOSAVE when you want just to load the RDB file you placed in the Redis working directory in order to replace the current dataset in memory. Use DEBUG RELOAD NOSAVE NOFLUSH MERGE when you want to add what is in the current RDB file placed in the Redis current directory, with the current memory content. Use DEBUG RELOAD when you want to verify Redis is able to persist the current dataset in the RDB file, flush the memory content, and load it back.",
-"RESTART -- Graceful restart: save config, db, restart.",
-"SDSLEN <key> -- Show low level SDS string info representing key and value.",
-"SEGFAULT -- Crash the server with sigsegv.",
-"SET-ACTIVE-EXPIRE <0|1> -- Setting it to 0 disables expiring keys in background when they are not accessed (otherwise the Redis behavior). Setting it to 1 reenables back the default.",
-"AOF-FLUSH-SLEEP <microsec> -- Server will sleep before flushing the AOF, this is used for testing",
-"SLEEP <seconds> -- Stop the server for <seconds>. Decimals allowed.",
-"STRUCTSIZE -- Return the size of different Redis core C structures.",
-"ZIPLIST <key> -- Show low level info about the ziplist encoding.",
-"STRINGMATCH-TEST -- Run a fuzz tester against the stringmatchlen() function.",
-"CONFIG-REWRITE-FORCE-ALL -- Like CONFIG REWRITE but writes all configuration options, including keywords not listed in original configuration file or default values.",
-#ifdef USE_JEMALLOC
-"MALLCTL <key> [<val>] -- Get or set a malloc tunning integer.",
-"MALLCTL-STR <key> [<val>] -- Get or set a malloc tunning string.",
-#endif
-NULL
-        };
-        addReplyHelp(c, help);
-    } else if (!strcasecmp(c->argv[1]->ptr,"segfault")) {
-        *((char*)-1) = 'x';
-    } else if (!strcasecmp(c->argv[1]->ptr,"panic")) {
-        serverPanic("DEBUG PANIC called at Unix time %ld", time(NULL));
-    } else if (!strcasecmp(c->argv[1]->ptr,"restart") ||
-               !strcasecmp(c->argv[1]->ptr,"crash-and-recover"))
-    {
-        long long delay = 0;
-        if (c->argc >= 3) {
-            if (getLongLongFromObjectOrReply(c, c->argv[2], &delay, NULL)
-                != C_OK) return;
-            if (delay < 0) delay = 0;
-        }
-        int flags = !strcasecmp(c->argv[1]->ptr,"restart") ?
-            (RESTART_SERVER_GRACEFULLY|RESTART_SERVER_CONFIG_REWRITE) :
-             RESTART_SERVER_NONE;
-        restartServer(flags,delay);
-        addReplyError(c,"failed to restart the server. Check server logs.");
-    } else if (!strcasecmp(c->argv[1]->ptr,"oom")) {
-        void *ptr = zmalloc(ULONG_MAX); /* Should trigger an out of memory. */
-        zfree(ptr);
-        addReply(c,shared.ok);
-    } else if (!strcasecmp(c->argv[1]->ptr,"assert")) {
-        serverAssertWithInfo(c,c->argv[0],1 == 2);
-    } else if (!strcasecmp(c->argv[1]->ptr,"log") && c->argc == 3) {
-        serverLog(LL_WARNING, "DEBUG LOG: %s", (char*)c->argv[2]->ptr);
-        addReply(c,shared.ok);
-    } else if (!strcasecmp(c->argv[1]->ptr,"leak") && c->argc == 3) {
-        sdsdup(c->argv[2]->ptr);
-        addReply(c,shared.ok);
-    } else if (!strcasecmp(c->argv[1]->ptr,"reload")) {
-        int flush = 1, save = 1;
-        int flags = RDBFLAGS_NONE;
-
-        /* Parse the additional options that modify the RELOAD
-         * behavior. */
-        for (int j = 2; j < c->argc; j++) {
-            char *opt = c->argv[j]->ptr;
-            if (!strcasecmp(opt,"MERGE")) {
-                flags |= RDBFLAGS_ALLOW_DUP;
-            } else if (!strcasecmp(opt,"NOFLUSH")) {
-                flush = 0;
-            } else if (!strcasecmp(opt,"NOSAVE")) {
-                save = 0;
-            } else {
-                addReplyError(c,"DEBUG RELOAD only supports the "
-                                "MERGE, NOFLUSH and NOSAVE options.");
-                return;
-            }
-        }
-
-        /* The default behavior is to save the RDB file before loading
-         * it back. */
-        if (save) {
-            rdbSaveInfo rsi, *rsiptr;
-            rsiptr = rdbPopulateSaveInfo(&rsi);
-            if (rdbSave(server.rdb_filename,rsiptr) != C_OK) {
-                addReply(c,shared.err);
-                return;
-            }
-        }
-
-        /* The default behavior is to remove the current dataset from
-         * memory before loading the RDB file, however when MERGE is
-         * used together with NOFLUSH, we are able to merge two datasets. */
-        if (flush) emptyDb(-1,EMPTYDB_NO_FLAGS,NULL);
-
-        protectClient(c);
-        int ret = rdbLoad(server.rdb_filename,NULL,flags);
-        unprotectClient(c);
-        if (ret != C_OK) {
-            addReplyError(c,"Error trying to load the RDB dump");
-            return;
-        }
-        serverLog(LL_WARNING,"DB reloaded by DEBUG RELOAD");
-        addReply(c,shared.ok);
-    } else if (!strcasecmp(c->argv[1]->ptr,"loadaof")) {
-        if (server.aof_state != AOF_OFF) flushAppendOnlyFile(1);
-        emptyDb(-1,EMPTYDB_NO_FLAGS,NULL);
-        protectClient(c);
-        int ret = loadAppendOnlyFile(server.aof_filename);
-        unprotectClient(c);
-        if (ret != C_OK) {
-            addReply(c,shared.err);
-            return;
-        }
-        server.dirty = 0; /* Prevent AOF / replication */
-        serverLog(LL_WARNING,"Append Only File loaded by DEBUG LOADAOF");
-        addReply(c,shared.ok);
-    } else if (!strcasecmp(c->argv[1]->ptr,"object") && c->argc == 3) {
-        dictEntry *de;
-        robj *val;
-        char *strenc;
-
-        if ((de = dictFind(c->db->dict,c->argv[2]->ptr)) == NULL) {
-            addReply(c,shared.nokeyerr);
-            return;
-        }
-        val = dictGetVal(de);
-        strenc = strEncoding(val->encoding);
-
-        char extra[138] = {0};
-        if (val->encoding == OBJ_ENCODING_QUICKLIST) {
-            char *nextra = extra;
-            int remaining = sizeof(extra);
-            quicklist *ql = val->ptr;
-            /* Add number of quicklist nodes */
-            int used = snprintf(nextra, remaining, " ql_nodes:%lu", ql->len);
-            nextra += used;
-            remaining -= used;
-            /* Add average quicklist fill factor */
-            double avg = (double)ql->count/ql->len;
-            used = snprintf(nextra, remaining, " ql_avg_node:%.2f", avg);
-            nextra += used;
-            remaining -= used;
-            /* Add quicklist fill level / max ziplist size */
-            used = snprintf(nextra, remaining, " ql_ziplist_max:%d", ql->fill);
-            nextra += used;
-            remaining -= used;
-            /* Add isCompressed? */
-            int compressed = ql->compress != 0;
-            used = snprintf(nextra, remaining, " ql_compressed:%d", compressed);
-            nextra += used;
-            remaining -= used;
-            /* Add total uncompressed size */
-            unsigned long sz = 0;
-            for (quicklistNode *node = ql->head; node; node = node->next) {
-                sz += node->sz;
-            }
-            used = snprintf(nextra, remaining, " ql_uncompressed_size:%lu", sz);
-            nextra += used;
-            remaining -= used;
-        }
-
-        addReplyStatusFormat(c,
-            "Value at:%p refcount:%d "
-            "encoding:%s serializedlength:%zu "
-            "lru:%d lru_seconds_idle:%llu%s",
-            (void*)val, val->refcount,
-            strenc, rdbSavedObjectLen(val, c->argv[2]),
-            val->lru, estimateObjectIdleTime(val)/1000, extra);
-    } else if (!strcasecmp(c->argv[1]->ptr,"sdslen") && c->argc == 3) {
-        dictEntry *de;
-        robj *val;
-        sds key;
-
-        if ((de = dictFind(c->db->dict,c->argv[2]->ptr)) == NULL) {
-            addReply(c,shared.nokeyerr);
-            return;
-        }
-        val = dictGetVal(de);
-        key = dictGetKey(de);
-
-        if (val->type != OBJ_STRING || !sdsEncodedObject(val)) {
-            addReplyError(c,"Not an sds encoded string.");
-        } else {
-            addReplyStatusFormat(c,
-                "key_sds_len:%lld, key_sds_avail:%lld, key_zmalloc: %lld, "
-                "val_sds_len:%lld, val_sds_avail:%lld, val_zmalloc: %lld",
-                (long long) sdslen(key),
-                (long long) sdsavail(key),
-                (long long) sdsZmallocSize(key),
-                (long long) sdslen(val->ptr),
-                (long long) sdsavail(val->ptr),
-                (long long) getStringObjectSdsUsedMemory(val));
-        }
-    } else if (!strcasecmp(c->argv[1]->ptr,"ziplist") && c->argc == 3) {
-        robj *o;
-
-        if ((o = objectCommandLookupOrReply(c,c->argv[2],shared.nokeyerr))
-                == NULL) return;
-
-        if (o->encoding != OBJ_ENCODING_ZIPLIST) {
-            addReplyError(c,"Not a ziplist encoded object.");
-        } else {
-            ziplistRepr(o->ptr);
-            addReplyStatus(c,"Ziplist structure printed on stdout");
-        }
-    } else if (!strcasecmp(c->argv[1]->ptr,"populate") &&
-               c->argc >= 3 && c->argc <= 5) {
-        long keys, j;
-        robj *key, *val;
-        char buf[128];
-
-        if (getLongFromObjectOrReply(c, c->argv[2], &keys, NULL) != C_OK)
-            return;
-        dictExpand(c->db->dict,keys);
-        long valsize = 0;
-        if ( c->argc == 5 && getLongFromObjectOrReply(c, c->argv[4], &valsize, NULL) != C_OK ) 
-            return;
-        for (j = 0; j < keys; j++) {
-            snprintf(buf,sizeof(buf),"%s:%lu",
-                (c->argc == 3) ? "key" : (char*)c->argv[3]->ptr, j);
-            key = createStringObject(buf,strlen(buf));
-            if (lookupKeyWrite(c->db,key) != NULL) {
-                decrRefCount(key);
-                continue;
-            }
-            snprintf(buf,sizeof(buf),"value:%lu",j);
-            if (valsize==0)
-                val = createStringObject(buf,strlen(buf));
-            else {
-                int buflen = strlen(buf);
-                val = createStringObject(NULL,valsize);
-                memcpy(val->ptr, buf, valsize<=buflen? valsize: buflen);
-            }
-            dbAdd(c->db,key,val);
-            signalModifiedKey(c,c->db,key);
-            decrRefCount(key);
-        }
-        addReply(c,shared.ok);
-    } else if (!strcasecmp(c->argv[1]->ptr,"digest") && c->argc == 2) {
-        /* DEBUG DIGEST (form without keys specified) */
-        unsigned char digest[20];
-        sds d = sdsempty();
-
-        computeDatasetDigest(digest);
-        for (int i = 0; i < 20; i++) d = sdscatprintf(d, "%02x",digest[i]);
-        addReplyStatus(c,d);
-        sdsfree(d);
-    } else if (!strcasecmp(c->argv[1]->ptr,"digest-value") && c->argc >= 2) {
-        /* DEBUG DIGEST-VALUE key key key ... key. */
-        addReplyArrayLen(c,c->argc-2);
-        for (int j = 2; j < c->argc; j++) {
-            unsigned char digest[20];
-            memset(digest,0,20); /* Start with a clean result */
-            robj *o = lookupKeyReadWithFlags(c->db,c->argv[j],LOOKUP_NOTOUCH);
-            if (o) xorObjectDigest(c->db,c->argv[j],digest,o);
-
-            sds d = sdsempty();
-            for (int i = 0; i < 20; i++) d = sdscatprintf(d, "%02x",digest[i]);
-            addReplyStatus(c,d);
-            sdsfree(d);
-        }
-    } else if (!strcasecmp(c->argv[1]->ptr,"protocol") && c->argc == 3) {
-        /* DEBUG PROTOCOL [string|integer|double|bignum|null|array|set|map|
-         *                 attrib|push|verbatim|true|false] */
-        char *name = c->argv[2]->ptr;
-        if (!strcasecmp(name,"string")) {
-            addReplyBulkCString(c,"Hello World");
-        } else if (!strcasecmp(name,"integer")) {
-            addReplyLongLong(c,12345);
-        } else if (!strcasecmp(name,"double")) {
-            addReplyDouble(c,3.14159265359);
-        } else if (!strcasecmp(name,"bignum")) {
-            addReplyProto(c,"(1234567999999999999999999999999999999\r\n",40);
-        } else if (!strcasecmp(name,"null")) {
-            addReplyNull(c);
-        } else if (!strcasecmp(name,"array")) {
-            addReplyArrayLen(c,3);
-            for (int j = 0; j < 3; j++) addReplyLongLong(c,j);
-        } else if (!strcasecmp(name,"set")) {
-            addReplySetLen(c,3);
-            for (int j = 0; j < 3; j++) addReplyLongLong(c,j);
-        } else if (!strcasecmp(name,"map")) {
-            addReplyMapLen(c,3);
-            for (int j = 0; j < 3; j++) {
-                addReplyLongLong(c,j);
-                addReplyBool(c, j == 1);
-            }
-        } else if (!strcasecmp(name,"attrib")) {
-            addReplyAttributeLen(c,1);
-            addReplyBulkCString(c,"key-popularity");
-            addReplyArrayLen(c,2);
-            addReplyBulkCString(c,"key:123");
-            addReplyLongLong(c,90);
-            /* Attributes are not real replies, so a well formed reply should
-             * also have a normal reply type after the attribute. */
-            addReplyBulkCString(c,"Some real reply following the attribute");
-        } else if (!strcasecmp(name,"push")) {
-            addReplyPushLen(c,2);
-            addReplyBulkCString(c,"server-cpu-usage");
-            addReplyLongLong(c,42);
-            /* Push replies are not synchronous replies, so we emit also a
-             * normal reply in order for blocking clients just discarding the
-             * push reply, to actually consume the reply and continue. */
-            addReplyBulkCString(c,"Some real reply following the push reply");
-        } else if (!strcasecmp(name,"true")) {
-            addReplyBool(c,1);
-        } else if (!strcasecmp(name,"false")) {
-            addReplyBool(c,0);
-        } else if (!strcasecmp(name,"verbatim")) {
-            addReplyVerbatim(c,"This is a verbatim\nstring",25,"txt");
-        } else {
-            addReplyError(c,"Wrong protocol type name. Please use one of the following: string|integer|double|bignum|null|array|set|map|attrib|push|verbatim|true|false");
-        }
-    } else if (!strcasecmp(c->argv[1]->ptr,"sleep") && c->argc == 3) {
-        double dtime = strtod(c->argv[2]->ptr,NULL);
-        long long utime = dtime*1000000;
-        struct timespec tv;
-
-        tv.tv_sec = utime / 1000000;
-        tv.tv_nsec = (utime % 1000000) * 1000;
-        nanosleep(&tv, NULL);
-        addReply(c,shared.ok);
-    } else if (!strcasecmp(c->argv[1]->ptr,"set-active-expire") &&
-               c->argc == 3)
-    {
-        server.active_expire_enabled = atoi(c->argv[2]->ptr);
-        addReply(c,shared.ok);
-    } else if (!strcasecmp(c->argv[1]->ptr,"aof-flush-sleep") &&
-               c->argc == 3)
-    {
-        server.aof_flush_sleep = atoi(c->argv[2]->ptr);
-        addReply(c,shared.ok);
-    } else if (!strcasecmp(c->argv[1]->ptr,"lua-always-replicate-commands") &&
-               c->argc == 3)
-    {
-        server.lua_always_replicate_commands = atoi(c->argv[2]->ptr);
-        addReply(c,shared.ok);
-    } else if (!strcasecmp(c->argv[1]->ptr,"error") && c->argc == 3) {
-        sds errstr = sdsnewlen("-",1);
-
-        errstr = sdscatsds(errstr,c->argv[2]->ptr);
-        errstr = sdsmapchars(errstr,"\n\r","  ",2); /* no newlines in errors. */
-        errstr = sdscatlen(errstr,"\r\n",2);
-        addReplySds(c,errstr);
-    } else if (!strcasecmp(c->argv[1]->ptr,"structsize") && c->argc == 2) {
-        sds sizes = sdsempty();
-        sizes = sdscatprintf(sizes,"bits:%d ",(sizeof(void*) == 8)?64:32);
-        sizes = sdscatprintf(sizes,"robj:%d ",(int)sizeof(robj));
-        sizes = sdscatprintf(sizes,"dictentry:%d ",(int)sizeof(dictEntry));
-        sizes = sdscatprintf(sizes,"sdshdr5:%d ",(int)sizeof(struct sdshdr5));
-        sizes = sdscatprintf(sizes,"sdshdr8:%d ",(int)sizeof(struct sdshdr8));
-        sizes = sdscatprintf(sizes,"sdshdr16:%d ",(int)sizeof(struct sdshdr16));
-        sizes = sdscatprintf(sizes,"sdshdr32:%d ",(int)sizeof(struct sdshdr32));
-        sizes = sdscatprintf(sizes,"sdshdr64:%d ",(int)sizeof(struct sdshdr64));
-        addReplyBulkSds(c,sizes);
-    } else if (!strcasecmp(c->argv[1]->ptr,"htstats") && c->argc == 3) {
-        long dbid;
-        sds stats = sdsempty();
-        char buf[4096];
-
-        if (getLongFromObjectOrReply(c, c->argv[2], &dbid, NULL) != C_OK) {
-            sdsfree(stats);
-            return;
-        }
-        if (dbid < 0 || dbid >= server.dbnum) {
-            sdsfree(stats);
-            addReplyError(c,"Out of range database");
-            return;
-        }
-
-        stats = sdscatprintf(stats,"[Dictionary HT]\n");
-        dictGetStats(buf,sizeof(buf),server.db[dbid].dict);
-        stats = sdscat(stats,buf);
-
-        stats = sdscatprintf(stats,"[Expires HT]\n");
-        dictGetStats(buf,sizeof(buf),server.db[dbid].expires);
-        stats = sdscat(stats,buf);
-
-        addReplyVerbatim(c,stats,sdslen(stats),"txt");
-        sdsfree(stats);
-    } else if (!strcasecmp(c->argv[1]->ptr,"htstats-key") && c->argc == 3) {
-        robj *o;
-        dict *ht = NULL;
-
-        if ((o = objectCommandLookupOrReply(c,c->argv[2],shared.nokeyerr))
-                == NULL) return;
-
-        /* Get the hash table reference from the object, if possible. */
-        switch (o->encoding) {
-        case OBJ_ENCODING_SKIPLIST:
-            {
-                zset *zs = o->ptr;
-                ht = zs->dict;
-            }
-            break;
-        case OBJ_ENCODING_HT:
-            ht = o->ptr;
-            break;
-        }
-
-        if (ht == NULL) {
-            addReplyError(c,"The value stored at the specified key is not "
-                            "represented using an hash table");
-        } else {
-            char buf[4096];
-            dictGetStats(buf,sizeof(buf),ht);
-            addReplyVerbatim(c,buf,strlen(buf),"txt");
-        }
-    } else if (!strcasecmp(c->argv[1]->ptr,"change-repl-id") && c->argc == 2) {
-        serverLog(LL_WARNING,"Changing replication IDs after receiving DEBUG change-repl-id");
-        changeReplicationId();
-        clearReplicationId2();
-        addReply(c,shared.ok);
-    } else if (!strcasecmp(c->argv[1]->ptr,"stringmatch-test") && c->argc == 2)
-    {
-        stringmatchlen_fuzz_test();
-        addReplyStatus(c,"Apparently Redis did not crash: test passed");
-    } else if (!strcasecmp(c->argv[1]->ptr,"config-rewrite-force-all") && c->argc == 2)
-    {
-        if (rewriteConfig(server.configfile, 1) == -1)
-            addReplyError(c, "CONFIG-REWRITE-FORCE-ALL failed");
-        else
-            addReply(c, shared.ok);
-#ifdef USE_JEMALLOC
-    } else if(!strcasecmp(c->argv[1]->ptr,"mallctl") && c->argc >= 3) {
-        mallctl_int(c, c->argv+2, c->argc-2);
-        return;
-    } else if(!strcasecmp(c->argv[1]->ptr,"mallctl-str") && c->argc >= 3) {
-        mallctl_string(c, c->argv+2, c->argc-2);
-        return;
-#endif
-    } else {
-        addReplySubcommandSyntaxError(c);
-        return;
-    }
-}
-
 /* =========================== Crash handling  ============================== */
 
 void _serverAssert(const char *estr, const char *file, int line) {
@@ -840,31 +391,6 @@ void _serverAssert(const char *estr, const char *file, int line) {
         printCrashReport();
     }
     bugReportEnd(0, 0);
-}
-
-void _serverAssertPrintClientInfo(const client *c) {
-    int j;
-    char conninfo[CONN_INFO_LEN];
-
-    bugReportStart();
-    serverLog(LL_WARNING,"=== ASSERTION FAILED CLIENT CONTEXT ===");
-    serverLog(LL_WARNING,"client->flags = %llu", (unsigned long long) c->flags);
-    serverLog(LL_WARNING,"client->conn = %s", connGetInfo(c->conn, conninfo, sizeof(conninfo)));
-    serverLog(LL_WARNING,"client->argc = %d", c->argc);
-    for (j=0; j < c->argc; j++) {
-        char buf[128];
-        char *arg;
-
-        if (c->argv[j]->type == OBJ_STRING && sdsEncodedObject(c->argv[j])) {
-            arg = (char*) c->argv[j]->ptr;
-        } else {
-            snprintf(buf,sizeof(buf),"Object type: %u, encoding: %u",
-                c->argv[j]->type, c->argv[j]->encoding);
-            arg = buf;
-        }
-        serverLog(LL_WARNING,"client->argv[%d] = \"%s\" (refcount: %d)",
-            j, arg, c->argv[j]->refcount);
-    }
 }
 
 void serverLogObjectDebugInfo(const robj *o) {
@@ -899,8 +425,7 @@ void _serverAssertPrintObject(const robj *o) {
     serverLogObjectDebugInfo(o);
 }
 
-void _serverAssertWithInfo(const client *c, const robj *o, const char *estr, const char *file, int line) {
-    if (c) _serverAssertPrintClientInfo(c);
+void _serverAssertWithInfo(const robj *o, const char *estr, const char *file, int line) {
     if (o) _serverAssertPrintObject(o);
     _serverAssert(estr,file,line);
 }
@@ -1499,63 +1024,15 @@ void logStackTrace(void *eip, int uplevel) {
 
 /* Log global server info */
 void logServerInfo(void) {
-    sds infostring, clients;
     serverLogRaw(LL_WARNING|LL_RAW, "\n------ INFO OUTPUT ------\n");
-    infostring = genRedisInfoString("all");
-    serverLogRaw(LL_WARNING|LL_RAW, infostring);
     serverLogRaw(LL_WARNING|LL_RAW, "\n------ CLIENT LIST OUTPUT ------\n");
-    clients = getAllClientsInfoString(-1);
-    serverLogRaw(LL_WARNING|LL_RAW, clients);
-    sdsfree(infostring);
-    sdsfree(clients);
 }
 
 /* Log modules info. Something we wanna do last since we fear it may crash. */
-void logModulesInfo(void) {
-    serverLogRaw(LL_WARNING|LL_RAW, "\n------ MODULES INFO OUTPUT ------\n");
-    sds infostring = modulesCollectInfo(sdsempty(), NULL, 1, 0);
-    serverLogRaw(LL_WARNING|LL_RAW, infostring);
-    sdsfree(infostring);
-}
 
 /* Log information about the "current" client, that is, the client that is
  * currently being served by Redis. May be NULL if Redis is not serving a
  * client right now. */
-void logCurrentClient(void) {
-    if (server.current_client == NULL) return;
-
-    client *cc = server.current_client;
-    sds client;
-    int j;
-
-    serverLogRaw(LL_WARNING|LL_RAW, "\n------ CURRENT CLIENT INFO ------\n");
-    client = catClientInfoString(sdsempty(),cc);
-    serverLog(LL_WARNING|LL_RAW,"%s\n", client);
-    sdsfree(client);
-    for (j = 0; j < cc->argc; j++) {
-        robj *decoded;
-
-        decoded = getDecodedObject(cc->argv[j]);
-        serverLog(LL_WARNING|LL_RAW,"argv[%d]: '%s'\n", j,
-            (char*)decoded->ptr);
-        decrRefCount(decoded);
-    }
-    /* Check if the first argument, usually a key, is found inside the
-     * selected DB, and if so print info about the associated object. */
-    if (cc->argc >= 1) {
-        robj *val, *key;
-        dictEntry *de;
-
-        key = getDecodedObject(cc->argv[1]);
-        de = dictFind(cc->db->dict, key->ptr);
-        if (de) {
-            val = dictGetVal(de);
-            serverLog(LL_WARNING,"key '%s' found in DB containing the following object:", (char*)key->ptr);
-            serverLogObjectDebugInfo(val);
-        }
-        decrRefCount(key);
-    }
-}
 
 #if defined(HAVE_PROC_MAPS)
 
@@ -1642,7 +1119,7 @@ static void killMainThread(void) {
 void killThreads(void) {
     killMainThread();
     bioKillThreads();
-    killIOThreads();
+    // killIOThreads();
 }
 
 void doFastMemoryTest(void) {
@@ -1724,7 +1201,7 @@ void sigsegvHandler(int sig, siginfo_t *info, void *secret) {
 
     bugReportStart();
     serverLog(LL_WARNING,
-        "Redis %s crashed by signal: %d, si_code: %d", REDIS_VERSION, sig, info->si_code);
+        "Redis crashed by signal: %d", sig);
     if (sig == SIGSEGV || sig == SIGBUS) {
         serverLog(LL_WARNING,
         "Accessing address: %p", (void*)info->si_addr);
@@ -1761,10 +1238,10 @@ void printCrashReport(void) {
     logServerInfo();
 
     /* Log the current client */
-    logCurrentClient();
+    // logCurrentClient();
 
     /* Log modules info. Something we wanna do last since we fear it may crash. */
-    logModulesInfo();
+    // logModulesInfo();
 
     /* Run memory test in case the crash was triggered by memory corruption. */
     doFastMemoryTest();
@@ -1781,7 +1258,7 @@ void bugReportEnd(int killViaSignal, int sig) {
 );
 
     /* free(messages); Don't call free() with possibly corrupted memory. */
-    if (server.daemonize && server.supervised == 0) unlink(server.pidfile);
+    // if (server.daemonize && server.supervised == 0) unlink(server.pidfile);
 
     if (!killViaSignal) {
         if (server.use_exit_on_panic)

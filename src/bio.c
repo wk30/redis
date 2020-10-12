@@ -58,8 +58,15 @@
  */
 
 
-#include "server.h"
+#include "redis.h"
 #include "bio.h"
+#include "adlist.h"
+#include "zmalloc.h"
+#include <errno.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <string.h>
 
 static pthread_t bio_threads[BIO_NUM_OPS];
 static pthread_mutex_t bio_mutex[BIO_NUM_OPS];
@@ -167,8 +174,6 @@ void *bioProcessBackgroundJobs(void *arg) {
     }
 
     redisSetCpuAffinity(server.bio_cpulist);
-
-    makeThreadKillable();
 
     pthread_mutex_lock(&bio_mutex[type]);
     /* Block SIGALRM so we are sure that only the main thread will

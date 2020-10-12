@@ -34,7 +34,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "server.h"
+#include "redis.h"
 #include <time.h>
 #include <assert.h>
 #include <stddef.h>
@@ -1086,9 +1086,6 @@ void activeDefragCycle(void) {
         }
         return;
     }
-
-    if (hasActiveChildProcess())
-        return; /* Defragging memory while there's a fork will just do damage. */
 
     /* Once a second, check if the fragmentation justfies starting a scan
      * or making it more aggressive. */

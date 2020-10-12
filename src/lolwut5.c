@@ -33,9 +33,10 @@
  * each new version of Redis.
  */
 
-#include "server.h"
+#include "redis.h"
 #include "lolwut.h"
 #include <math.h>
+#include <stdlib.h>
 
 /* Translate a group of 8 pixels (2x4 vertical rectangle) to the corresponding
  * braille character. The byte should correspond to the pixels arranged as
@@ -106,7 +107,7 @@ lwCanvas *lwDrawSchotter(int console_cols, int squares_per_row, int squares_per_
  * logical canvas. The actual returned string will require a terminal that is
  * width/2 large and height/4 tall in order to hold the whole image without
  * overflowing or scrolling, since each Barille character is 2x4. */
-static sds renderCanvas(lwCanvas *canvas) {
+sds renderCanvas(lwCanvas *canvas) {
     sds text = sdsempty();
     for (int y = 0; y < canvas->height; y += 4) {
         for (int x = 0; x < canvas->width; x += 2) {
@@ -137,41 +138,3 @@ static sds renderCanvas(lwCanvas *canvas) {
  * By default the command uses 66 columns, 8 squares per row, 12 squares
  * per column.
  */
-void lolwut5Command(client *c) {
-    long cols = 66;
-    long squares_per_row = 8;
-    long squares_per_col = 12;
-
-    /* Parse the optional arguments if any. */
-    if (c->argc > 1 &&
-        getLongFromObjectOrReply(c,c->argv[1],&cols,NULL) != C_OK)
-        return;
-
-    if (c->argc > 2 &&
-        getLongFromObjectOrReply(c,c->argv[2],&squares_per_row,NULL) != C_OK)
-        return;
-
-    if (c->argc > 3 &&
-        getLongFromObjectOrReply(c,c->argv[3],&squares_per_col,NULL) != C_OK)
-        return;
-
-    /* Limits. We want LOLWUT to be always reasonably fast and cheap to execute
-     * so we have maximum number of columns, rows, and output resolution. */
-    if (cols < 1) cols = 1;
-    if (cols > 1000) cols = 1000;
-    if (squares_per_row < 1) squares_per_row = 1;
-    if (squares_per_row > 200) squares_per_row = 200;
-    if (squares_per_col < 1) squares_per_col = 1;
-    if (squares_per_col > 200) squares_per_col = 200;
-
-    /* Generate some computer art and reply. */
-    lwCanvas *canvas = lwDrawSchotter(cols,squares_per_row,squares_per_col);
-    sds rendered = renderCanvas(canvas);
-    rendered = sdscat(rendered,
-        "\nGeorg Nees - schotter, plotter on paper, 1968. Redis ver. ");
-    rendered = sdscat(rendered,REDIS_VERSION);
-    rendered = sdscatlen(rendered,"\n",1);
-    addReplyVerbatim(c,rendered,sdslen(rendered),"txt");
-    sdsfree(rendered);
-    lwFreeCanvas(canvas);
-}

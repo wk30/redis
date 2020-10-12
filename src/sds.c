@@ -1143,6 +1143,14 @@ void *sds_malloc(size_t size) { return s_malloc(size); }
 void *sds_realloc(void *ptr, size_t size) { return s_realloc(ptr,size); }
 void sds_free(void *ptr) { s_free(ptr); }
 
+/* Return the size consumed from the allocator, for the specified SDS string,
+ * including internal fragmentation. This function is used in order to compute
+ * the client output buffer size. */
+size_t sdsZmallocSize(sds s) {
+    void *sh = sdsAllocPtr(s);
+    return zmalloc_size(sh);
+}
+
 #ifdef REDIS_TEST
 #include <stdio.h>
 #include "testhelp.h"

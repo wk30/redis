@@ -33,6 +33,9 @@
 
 #ifndef __LATENCY_H
 #define __LATENCY_H
+#include "redis.h"
+#include <time.h>
+#include <stdint.h>
 
 #define LATENCY_TS_LEN 160 /* History length for every monitored event. */
 

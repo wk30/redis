@@ -38,6 +38,9 @@
  * This should be the size of the buffer given to ld2string */
 #define MAX_LONG_DOUBLE_CHARS 5*1024
 
+typedef long long mstime_t; /* millisecond time type. */
+typedef long long ustime_t; /* microsecond time type. */
+
 /* long double to string convertion options */
 typedef enum {
     LD_STR_AUTO,     /* %.17Lg */
@@ -66,5 +69,16 @@ int pathIsBaseName(char *path);
 #ifdef REDIS_TEST
 int utilTest(int argc, char **argv);
 #endif
+
+long long ustime(void);
+long long mstime(void);
+void getRandomHexChars(char *p, size_t len);
+void getRandomBytes(unsigned char *p, size_t len);
+uint64_t crc64(uint64_t crc, const unsigned char *s, uint64_t l);
+void exitFromChild(int retcode);
+size_t redisPopcount(void *s, long count);
+void redisSetProcTitle(char *title);
+int redisCommunicateSystemd(const char *sd_notify_msg);
+void redisSetCpuAffinity(const char *cpulist);
 
 #endif

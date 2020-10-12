@@ -30,9 +30,11 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "server.h"
-
+#include "sparkline.h"
+#include "sds.h"
+#include "zmalloc.h"
 #include <math.h>
+#include <string.h>
 
 /* This is the charset used to display the graphs, but multiple rows are used
  * to increase the resolution. */

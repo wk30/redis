@@ -28,7 +28,7 @@
  */
 
 
-#include "server.h"
+#include "redis.h"
 #include "connhelpers.h"
 #include "adlist.h"
 

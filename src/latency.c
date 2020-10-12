@@ -33,7 +33,10 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "server.h"
+#include "latency.h"
+#include "sparkline.h"
+#include "zmalloc.h"
+#include <string.h>
 
 /* Dictionary type for latency events. */
 int dictStringKeyCompare(void *privdata, const void *key1, const void *key2) {
@@ -217,20 +220,15 @@ void analyzeLatencyForEvent(char *event, struct latencyStats *ls) {
 sds createLatencyReport(void) {
     sds report = sdsempty();
     int advise_better_vm = 0;       /* Better virtual machines. */
-    int advise_slowlog_enabled = 0; /* Enable slowlog. */
-    int advise_slowlog_tuning = 0;  /* Reconfigure slowlog. */
-    int advise_slowlog_inspect = 0; /* Check your slowlog. */
     int advise_disk_contention = 0; /* Try to lower disk contention. */
     int advise_scheduler = 0;       /* Intrinsic latency. */
     int advise_data_writeback = 0;  /* data=writeback. */
     int advise_no_appendfsync = 0;  /* don't fsync during rewrites. */
     int advise_local_disk = 0;      /* Avoid remote disks. */
     int advise_ssd = 0;             /* Use an SSD drive. */
-    int advise_write_load_info = 0; /* Print info about AOF and write load. */
     int advise_hz = 0;              /* Use higher HZ. */
     int advise_large_objects = 0;   /* Deletion of large objects. */
     int advise_mass_eviction = 0;   /* Avoid mass eviction of keys. */
-    int advise_relax_fsync_policy = 0; /* appendfsync always is slow. */
     int advise_disable_thp = 0;     /* AnonHugePages detected. */
     int advices = 0;
 
@@ -293,78 +291,9 @@ sds createLatencyReport(void) {
         }
 
         /* Potentially commands. */
-        if (!strcasecmp(event,"command")) {
-            if (server.slowlog_log_slower_than < 0) {
-                advise_slowlog_enabled = 1;
-                advices++;
-            } else if (server.slowlog_log_slower_than/1000 >
-                       server.latency_monitor_threshold)
-            {
-                advise_slowlog_tuning = 1;
-                advices++;
-            }
-            advise_slowlog_inspect = 1;
-            advise_large_objects = 1;
-            advices += 2;
-        }
-
         /* fast-command. */
-        if (!strcasecmp(event,"fast-command")) {
-            advise_scheduler = 1;
-            advices++;
-        }
-
         /* AOF and I/O. */
-        if (!strcasecmp(event,"aof-write-pending-fsync")) {
-            advise_local_disk = 1;
-            advise_disk_contention = 1;
-            advise_ssd = 1;
-            advise_data_writeback = 1;
-            advices += 4;
-        }
-
-        if (!strcasecmp(event,"aof-write-active-child")) {
-            advise_no_appendfsync = 1;
-            advise_data_writeback = 1;
-            advise_ssd = 1;
-            advices += 3;
-        }
-
-        if (!strcasecmp(event,"aof-write-alone")) {
-            advise_local_disk = 1;
-            advise_data_writeback = 1;
-            advise_ssd = 1;
-            advices += 3;
-        }
-
-        if (!strcasecmp(event,"aof-fsync-always")) {
-            advise_relax_fsync_policy = 1;
-            advices++;
-        }
-
-        if (!strcasecmp(event,"aof-fstat") ||
-            !strcasecmp(event,"rdb-unlink-temp-file")) {
-            advise_disk_contention = 1;
-            advise_local_disk = 1;
-            advices += 2;
-        }
-
-        if (!strcasecmp(event,"aof-rewrite-diff-write") ||
-            !strcasecmp(event,"aof-rename")) {
-            advise_write_load_info = 1;
-            advise_data_writeback = 1;
-            advise_ssd = 1;
-            advise_local_disk = 1;
-            advices += 4;
-        }
-
         /* Expire cycle. */
-        if (!strcasecmp(event,"expire-cycle")) {
-            advise_hz = 1;
-            advise_large_objects = 1;
-            advices += 2;
-        }
-
         /* Eviction cycle. */
         if (!strcasecmp(event,"eviction-del")) {
             advise_large_objects = 1;
@@ -399,19 +328,6 @@ sds createLatencyReport(void) {
             report = sdscat(report,"- If you are using a virtual machine, consider upgrading it with a faster one using a hypervisior that provides less latency during fork() calls. Xen is known to have poor fork() performance. Even in the context of the same VM provider, certain kinds of instances can execute fork faster than others.\n");
         }
 
-        /* Slow log. */
-        if (advise_slowlog_enabled) {
-            report = sdscatprintf(report,"- There are latency issues with potentially slow commands you are using. Try to enable the Slow Log Redis feature using the command 'CONFIG SET slowlog-log-slower-than %llu'. If the Slow log is disabled Redis is not able to log slow commands execution for you.\n", (unsigned long long)server.latency_monitor_threshold*1000);
-        }
-
-        if (advise_slowlog_tuning) {
-            report = sdscatprintf(report,"- Your current Slow Log configuration only logs events that are slower than your configured latency monitor threshold. Please use 'CONFIG SET slowlog-log-slower-than %llu'.\n", (unsigned long long)server.latency_monitor_threshold*1000);
-        }
-
-        if (advise_slowlog_inspect) {
-            report = sdscat(report,"- Check your Slow Log to understand what are the commands you are running which are too slow to execute. Please check http://redis.io/commands/slowlog for more information.\n");
-        }
-
         /* Intrinsic latency. */
         if (advise_scheduler) {
             report = sdscat(report,"- The system is slow to execute Redis code paths not containing system calls. This usually means the system does not provide Redis CPU time to run for long periods. You should try to:\n"
@@ -443,14 +359,6 @@ sds createLatencyReport(void) {
             report = sdscat(report,"- Assuming from the point of view of data safety this is viable in your environment, you could try to enable the 'no-appendfsync-on-rewrite' option, so that fsync will not be performed while there is a child rewriting the AOF file or producing an RDB file (the moment where there is high disk contention).\n");
         }
 
-        if (advise_relax_fsync_policy && server.aof_fsync == AOF_FSYNC_ALWAYS) {
-            report = sdscat(report,"- Your fsync policy is set to 'always'. It is very hard to get good performances with such a setup, if possible try to relax the fsync policy to 'onesec'.\n");
-        }
-
-        if (advise_write_load_info) {
-            report = sdscat(report,"- Latency during the AOF atomic rename operation or when the final difference is flushed to the AOF file at the end of the rewrite, sometimes is caused by very high write load, causing the AOF buffer to get very large. If possible try to send less commands to accomplish the same work, or use Lua scripts to group multiple operations into a single EVALSHA call.\n");
-        }
-
         if (advise_hz && server.hz < 100) {
             report = sdscat(report,"- In order to make the Redis keys expiring process more incremental, try to set the 'hz' configuration parameter to 100 using 'CONFIG SET hz 100'.\n");
         }
@@ -472,46 +380,6 @@ sds createLatencyReport(void) {
 }
 
 /* ---------------------- Latency command implementation -------------------- */
-
-/* latencyCommand() helper to produce a time-delay reply for all the samples
- * in memory for the specified time series. */
-void latencyCommandReplyWithSamples(client *c, struct latencyTimeSeries *ts) {
-    void *replylen = addReplyDeferredLen(c);
-    int samples = 0, j;
-
-    for (j = 0; j < LATENCY_TS_LEN; j++) {
-        int i = (ts->idx + j) % LATENCY_TS_LEN;
-
-        if (ts->samples[i].time == 0) continue;
-        addReplyArrayLen(c,2);
-        addReplyLongLong(c,ts->samples[i].time);
-        addReplyLongLong(c,ts->samples[i].latency);
-        samples++;
-    }
-    setDeferredArrayLen(c,replylen,samples);
-}
-
-/* latencyCommand() helper to produce the reply for the LATEST subcommand,
- * listing the last latency sample for every event type registered so far. */
-void latencyCommandReplyWithLatestEvents(client *c) {
-    dictIterator *di;
-    dictEntry *de;
-
-    addReplyArrayLen(c,dictSize(server.latency_events));
-    di = dictGetIterator(server.latency_events);
-    while((de = dictNext(di)) != NULL) {
-        char *event = dictGetKey(de);
-        struct latencyTimeSeries *ts = dictGetVal(de);
-        int last = (ts->idx + LATENCY_TS_LEN - 1) % LATENCY_TS_LEN;
-
-        addReplyArrayLen(c,4);
-        addReplyBulkCString(c,event);
-        addReplyLongLong(c,ts->samples[last].time);
-        addReplyLongLong(c,ts->samples[last].latency);
-        addReplyLongLong(c,ts->max);
-    }
-    dictReleaseIterator(di);
-}
 
 #define LATENCY_GRAPH_COLS 80
 sds latencyCommandGenSparkeline(char *event, struct latencyTimeSeries *ts) {
@@ -557,81 +425,3 @@ sds latencyCommandGenSparkeline(char *event, struct latencyTimeSeries *ts) {
     freeSparklineSequence(seq);
     return graph;
 }
-
-/* LATENCY command implementations.
- *
- * LATENCY HISTORY: return time-latency samples for the specified event.
- * LATENCY LATEST: return the latest latency for all the events classes.
- * LATENCY DOCTOR: returns a human readable analysis of instance latency.
- * LATENCY GRAPH: provide an ASCII graph of the latency of the specified event.
- * LATENCY RESET: reset data of a specified event or all the data if no event provided.
- */
-void latencyCommand(client *c) {
-    const char *help[] = {
-"DOCTOR              -- Returns a human readable latency analysis report.",
-"GRAPH   <event>     -- Returns an ASCII latency graph for the event class.",
-"HISTORY <event>     -- Returns time-latency samples for the event class.",
-"LATEST              -- Returns the latest latency samples for all events.",
-"RESET   [event ...] -- Resets latency data of one or more event classes.",
-"                       (default: reset all data for all event classes)",
-"HELP                -- Prints this help.",
-NULL
-    };
-    struct latencyTimeSeries *ts;
-
-    if (!strcasecmp(c->argv[1]->ptr,"history") && c->argc == 3) {
-        /* LATENCY HISTORY <event> */
-        ts = dictFetchValue(server.latency_events,c->argv[2]->ptr);
-        if (ts == NULL) {
-            addReplyArrayLen(c,0);
-        } else {
-            latencyCommandReplyWithSamples(c,ts);
-        }
-    } else if (!strcasecmp(c->argv[1]->ptr,"graph") && c->argc == 3) {
-        /* LATENCY GRAPH <event> */
-        sds graph;
-        dictEntry *de;
-        char *event;
-
-        de = dictFind(server.latency_events,c->argv[2]->ptr);
-        if (de == NULL) goto nodataerr;
-        ts = dictGetVal(de);
-        event = dictGetKey(de);
-
-        graph = latencyCommandGenSparkeline(event,ts);
-        addReplyVerbatim(c,graph,sdslen(graph),"txt");
-        sdsfree(graph);
-    } else if (!strcasecmp(c->argv[1]->ptr,"latest") && c->argc == 2) {
-        /* LATENCY LATEST */
-        latencyCommandReplyWithLatestEvents(c);
-    } else if (!strcasecmp(c->argv[1]->ptr,"doctor") && c->argc == 2) {
-        /* LATENCY DOCTOR */
-        sds report = createLatencyReport();
-
-        addReplyVerbatim(c,report,sdslen(report),"txt");
-        sdsfree(report);
-    } else if (!strcasecmp(c->argv[1]->ptr,"reset") && c->argc >= 2) {
-        /* LATENCY RESET */
-        if (c->argc == 2) {
-            addReplyLongLong(c,latencyResetEvent(NULL));
-        } else {
-            int j, resets = 0;
-
-            for (j = 2; j < c->argc; j++)
-                resets += latencyResetEvent(c->argv[j]->ptr);
-            addReplyLongLong(c,resets);
-        }
-    } else if (!strcasecmp(c->argv[1]->ptr,"help") && c->argc == 2) {
-        addReplyHelp(c, help);
-    } else {
-        addReplySubcommandSyntaxError(c);
-    }
-    return;
-
-nodataerr:
-    /* Common error when the user asks for an event we have no latency
-     * information about. */
-    addReplyErrorFormat(c,
-        "No samples available for event '%s'", (char*) c->argv[2]->ptr);
-}
-

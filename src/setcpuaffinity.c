@@ -40,7 +40,6 @@
 #include <pthread.h>
 #include <sched.h>
 #endif
-#include "config.h"
 
 #ifdef USE_SETCPUAFFINITY
 static const char *next_token(const char *q,  int sep) {

@@ -30,6 +30,7 @@
 
 #ifndef __REDIS_CONNECTION_H
 #define __REDIS_CONNECTION_H
+#include <sys/types.h>
 
 #define CONN_INFO_LEN   32
 

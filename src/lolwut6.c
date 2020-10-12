@@ -39,12 +39,13 @@
  * output to have a better artistic effect.
  */
 
-#include "server.h"
+#include "redis.h"
 #include "lolwut.h"
+#include <stdlib.h>
 
 /* Render the canvas using the four gray levels of the standard color
  * terminal: they match very well to the grayscale display of the gameboy. */
-static sds renderCanvas(lwCanvas *canvas) {
+sds renderCanvas(lwCanvas *canvas) {
     sds text = sdsempty();
     for (int y = 0; y < canvas->height; y++) {
         for (int x = 0; x < canvas->width; x++) {
@@ -166,36 +167,3 @@ void generateSkyline(lwCanvas *canvas) {
  * By default the command uses 80 columns, 40 squares per row
  * per column.
  */
-void lolwut6Command(client *c) {
-    long cols = 80;
-    long rows = 20;
-
-    /* Parse the optional arguments if any. */
-    if (c->argc > 1 &&
-        getLongFromObjectOrReply(c,c->argv[1],&cols,NULL) != C_OK)
-        return;
-
-    if (c->argc > 2 &&
-        getLongFromObjectOrReply(c,c->argv[2],&rows,NULL) != C_OK)
-        return;
-
-    /* Limits. We want LOLWUT to be always reasonably fast and cheap to execute
-     * so we have maximum number of columns, rows, and output resulution. */
-    if (cols < 1) cols = 1;
-    if (cols > 1000) cols = 1000;
-    if (rows < 1) rows = 1;
-    if (rows > 1000) rows = 1000;
-
-    /* Generate the city skyline and reply. */
-    lwCanvas *canvas = lwCreateCanvas(cols,rows,3);
-    generateSkyline(canvas);
-    sds rendered = renderCanvas(canvas);
-    rendered = sdscat(rendered,
-        "\nDedicated to the 8 bit game developers of past and present.\n"
-        "Original 8 bit image from Plaguemon by hikikomori. Redis ver. ");
-    rendered = sdscat(rendered,REDIS_VERSION);
-    rendered = sdscatlen(rendered,"\n",1);
-    addReplyVerbatim(c,rendered,sdslen(rendered),"txt");
-    sdsfree(rendered);
-    lwFreeCanvas(canvas);
-}

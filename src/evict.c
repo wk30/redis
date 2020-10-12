@@ -30,10 +30,17 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "server.h"
+#include "redis.h"
 #include "bio.h"
+#include "ae.h"
 #include "atomicvar.h"
+#include "latency.h"
+#include "object.h"
+#include "monotonic.h"
+#include "zmalloc.h"
 #include <math.h>
+#include <stdlib.h>
+#include <string.h>
 
 /* ----------------------------------------------------------------------------
  * Data structures
@@ -324,29 +331,6 @@ unsigned long LFUDecrAndReturn(robj *o) {
     return counter;
 }
 
-/* We don't want to count AOF buffers and slaves output buffers as
- * used memory: the eviction should use mostly data size. This function
- * returns the sum of AOF and slaves buffer. */
-size_t freeMemoryGetNotCountedMemory(void) {
-    size_t overhead = 0;
-    int slaves = listLength(server.slaves);
-
-    if (slaves) {
-        listIter li;
-        listNode *ln;
-
-        listRewind(server.slaves,&li);
-        while((ln = listNext(&li))) {
-            client *slave = listNodeValue(ln);
-            overhead += getClientOutputBufferMemoryUsage(slave);
-        }
-    }
-    if (server.aof_state != AOF_OFF) {
-        overhead += sdsalloc(server.aof_buf)+aofRewriteBufferSize();
-    }
-    return overhead;
-}
-
 /* Get the memory status from the point of view of the maxmemory directive:
  * if the memory used is under the maxmemory setting then C_OK is returned.
  * Otherwise, if we are over the memory limit, the function returns
@@ -386,8 +370,6 @@ int getMaxmemoryState(size_t *total, size_t *logical, size_t *tofree, float *lev
     /* Remove the size of slaves output buffers and AOF buffer from the
      * count of used memory. */
     mem_used = mem_reported;
-    size_t overhead = freeMemoryGetNotCountedMemory();
-    mem_used = (mem_used > overhead) ? mem_used-overhead : 0;
 
     /* Compute the ratio of memory usage. */
     if (level) {
@@ -418,7 +400,7 @@ int getMaxmemoryState(size_t *total, size_t *logical, size_t *tofree, float *lev
  * eviction cycles until the "maxmemory" condition has resolved or there are no
  * more evictable items.  */
 static int isEvictionProcRunning = 0;
-static int evictionTimeProc(
+int evictionTimeProc(
         struct aeEventLoop *eventLoop, long long id, void *clientData) {
     UNUSED(eventLoop);
     UNUSED(id);
@@ -430,27 +412,6 @@ static int evictionTimeProc(
      * For EVICT_FAIL - there is nothing left to evict.  */
     isEvictionProcRunning = 0;
     return AE_NOMORE;
-}
-
-/* Check if it's safe to perform evictions.
- *   Returns 1 if evictions can be performed
- *   Returns 0 if eviction processing should be skipped
- */
-static int isSafeToPerformEvictions(void) {
-    /* - There must be no script in timeout condition.
-     * - Nor we are loading data right now.  */
-    if (server.lua_timedout || server.loading) return 0;
-
-    /* By default replicas should ignore maxmemory
-     * and just be masters exact copies. */
-    if (server.masterhost && server.repl_slave_ignore_maxmemory) return 0;
-
-    /* When clients are paused the dataset should be static not just from the
-     * POV of clients not being able to write, but also from the POV of
-     * expires and evictions of keys not being performed. */
-    if (clientsArePaused()) return 0;
-
-    return 1;
 }
 
 /* Algorithm for converting tenacity (0-100) to a time limit.  */
@@ -496,13 +457,10 @@ static unsigned long evictionTimeLimitUs() {
  *   EVICT_FAIL     - memory is over the limit, and there's nothing to evict
  * */
 int performEvictions(void) {
-    if (!isSafeToPerformEvictions()) return EVICT_OK;
-
     int keys_freed = 0;
     size_t mem_reported, mem_tofree, mem_freed;
     mstime_t latency, eviction_latency;
     long long delta;
-    int slaves = listLength(server.slaves);
     int result = EVICT_FAIL;
 
     if (getMaxmemoryState(&mem_reported,NULL,&mem_tofree,NULL) == C_OK)
@@ -607,7 +565,6 @@ int performEvictions(void) {
         if (bestkey) {
             db = server.db+bestdbid;
             robj *keyobj = createStringObject(bestkey,sdslen(bestkey));
-            propagateExpire(db,keyobj,server.lazyfree_lazy_eviction);
             /* We compute the amount of memory freed by db*Delete() alone.
              * It is possible that actually the memory needed to propagate
              * the DEL in AOF and replication link is greater than the one
@@ -622,24 +579,15 @@ int performEvictions(void) {
                 dbAsyncDelete(db,keyobj);
             else
                 dbSyncDelete(db,keyobj);
-            signalModifiedKey(NULL,db,keyobj);
             latencyEndMonitor(eviction_latency);
             latencyAddSampleIfNeeded("eviction-del",eviction_latency);
             delta -= (long long) zmalloc_used_memory();
             mem_freed += delta;
             server.stat_evictedkeys++;
-            notifyKeyspaceEvent(NOTIFY_EVICTED, "evicted",
-                keyobj, db->id);
             decrRefCount(keyobj);
             keys_freed++;
 
             if (keys_freed % 16 == 0) {
-                /* When the memory to free starts to be big enough, we may
-                 * start spending so much time here that is impossible to
-                 * deliver data to the replicas fast enough, so we force the
-                 * transmission here inside the loop. */
-                if (slaves) flushSlavesOutputBuffers();
-
                 /* Normally our stop condition is the ability to release
                  * a fixed, pre-computed amount of memory. However when we
                  * are deleting objects in another thread, it's better to
@@ -660,8 +608,6 @@ int performEvictions(void) {
                     // We still need to free memory - start eviction timer proc
                     if (!isEvictionProcRunning) {
                         isEvictionProcRunning = 1;
-                        aeCreateTimeEvent(server.el, 0,
-                                evictionTimeProc, NULL, NULL);
                     }
                     break;
                 }

@@ -1,7 +1,8 @@
-#include "server.h"
+#include "t_zset.h"
 #include "bio.h"
 #include "atomicvar.h"
-#include "cluster.h"
+#include "object.h"
+#include <string.h>
 
 static redisAtomic size_t lazyfree_objects = 0;
 
@@ -106,7 +107,6 @@ int dbAsyncDelete(redisDb *db, robj *key) {
      * field to NULL in order to lazy free it later. */
     if (de) {
         dictFreeUnlinkedEntry(db->dict,de);
-        if (server.cluster_enabled) slotToKeyDel(key->ptr);
         return 1;
     } else {
         return 0;
@@ -133,18 +133,6 @@ void emptyDbAsync(redisDb *db) {
     db->expires = dictCreate(&keyptrDictType,NULL);
     atomicIncr(lazyfree_objects,dictSize(oldht1));
     bioCreateBackgroundJob(BIO_LAZY_FREE,NULL,oldht1,oldht2);
-}
-
-/* Empty the slots-keys map of Redis CLuster by creating a new empty one
- * and scheduling the old for lazy freeing. */
-void slotToKeyFlushAsync(void) {
-    rax *old = server.cluster->slots_to_keys;
-
-    server.cluster->slots_to_keys = raxNew();
-    memset(server.cluster->slots_keys_count,0,
-           sizeof(server.cluster->slots_keys_count));
-    atomicIncr(lazyfree_objects,old->numele);
-    bioCreateBackgroundJob(BIO_LAZY_FREE,NULL,NULL,old);
 }
 
 /* Release objects from the lazyfree thread. It's just decrRefCount()

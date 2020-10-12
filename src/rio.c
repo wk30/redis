@@ -44,16 +44,16 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-
+#include "redis.h"
 #include "fmacros.h"
-#include <string.h>
-#include <stdio.h>
-#include <unistd.h>
 #include "rio.h"
 #include "util.h"
 #include "crc64.h"
-#include "config.h"
-#include "server.h"
+#include <errno.h>
+#include <string.h>
+#include <stdio.h>
+#include <unistd.h>
+
 
 /* ------------------------- Buffer I/O implementation ----------------------- */
 

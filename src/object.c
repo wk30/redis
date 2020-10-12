@@ -28,9 +28,17 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "server.h"
+#include "redis.h"
+#include "object.h"
+#include "intset.h"
+#include "t_hash.h"
+#include "t_set.h"
+#include "t_zset.h"
+#include "ziplist.h"
+#include "zmalloc.h"
 #include <math.h>
 #include <ctype.h>
+#include <string.h>
 
 #ifdef __CYGWIN__
 #define strtold(a,b) ((long double)strtod((a),(b)))
@@ -271,13 +279,6 @@ robj *createStreamObject(void) {
     return o;
 }
 
-robj *createModuleObject(moduleType *mt, void *value) {
-    moduleValue *mv = zmalloc(sizeof(*mv));
-    mv->type = mt;
-    mv->value = value;
-    return createObject(OBJ_MODULE,mv);
-}
-
 void freeStringObject(robj *o) {
     if (o->encoding == OBJ_ENCODING_RAW) {
         sdsfree(o->ptr);
@@ -336,12 +337,6 @@ void freeHashObject(robj *o) {
     }
 }
 
-void freeModuleObject(robj *o) {
-    moduleValue *mv = o->ptr;
-    mv->type->free(mv->value);
-    zfree(mv);
-}
-
 void freeStreamObject(robj *o) {
     freeStream(o->ptr);
 }
@@ -366,7 +361,6 @@ void decrRefCount(robj *o) {
         case OBJ_SET: freeSetObject(o); break;
         case OBJ_ZSET: freeZsetObject(o); break;
         case OBJ_HASH: freeHashObject(o); break;
-        case OBJ_MODULE: freeModuleObject(o); break;
         case OBJ_STREAM: freeStreamObject(o); break;
         default: serverPanic("Unknown object type"); break;
         }
@@ -401,10 +395,9 @@ robj *resetRefCount(robj *obj) {
     return obj;
 }
 
-int checkType(client *c, robj *o, int type) {
+int checkType(robj *o, int type) {
     /* A NULL is considered an empty key */
     if (o && o->type != type) {
-        addReply(c,shared.wrongtypeerr);
         return 1;
     }
     return 0;
@@ -415,7 +408,7 @@ int isSdsRepresentableAsLongLong(sds s, long long *llval) {
 }
 
 int isObjectRepresentableAsLongLong(robj *o, long long *llval) {
-    serverAssertWithInfo(NULL,o,o->type == OBJ_STRING);
+    serverAssertWithInfo(o,o->type == OBJ_STRING);
     if (o->encoding == OBJ_ENCODING_INT) {
         if (llval) *llval = (long) o->ptr;
         return C_OK;
@@ -446,7 +439,7 @@ robj *tryObjectEncoding(robj *o) {
      * in this function. Other types use encoded memory efficient
      * representations but are handled by the commands implementing
      * the type. */
-    serverAssertWithInfo(NULL,o,o->type == OBJ_STRING);
+    serverAssertWithInfo(o,o->type == OBJ_STRING);
 
     /* We try some specialized encoding only for objects that are
      * RAW or EMBSTR encoded, in other words objects that are still
@@ -548,7 +541,7 @@ robj *getDecodedObject(robj *o) {
 #define REDIS_COMPARE_COLL (1<<1)
 
 int compareStringObjectsWithFlags(robj *a, robj *b, int flags) {
-    serverAssertWithInfo(NULL,a,a->type == OBJ_STRING && b->type == OBJ_STRING);
+    serverAssertWithInfo(a,a->type == OBJ_STRING && b->type == OBJ_STRING);
     char bufa[128], bufb[128], *astr, *bstr;
     size_t alen, blen, minlen;
 
@@ -605,7 +598,7 @@ int equalStringObjects(robj *a, robj *b) {
 }
 
 size_t stringObjectLen(robj *o) {
-    serverAssertWithInfo(NULL,o,o->type == OBJ_STRING);
+    serverAssertWithInfo(o,o->type == OBJ_STRING);
     if (sdsEncodedObject(o)) {
         return sdslen(o->ptr);
     } else {
@@ -619,7 +612,7 @@ int getDoubleFromObject(const robj *o, double *target) {
     if (o == NULL) {
         value = 0;
     } else {
-        serverAssertWithInfo(NULL,o,o->type == OBJ_STRING);
+        serverAssertWithInfo(o,o->type == OBJ_STRING);
         if (sdsEncodedObject(o)) {
             if (!string2d(o->ptr, sdslen(o->ptr), &value))
                 return C_ERR;
@@ -633,27 +626,13 @@ int getDoubleFromObject(const robj *o, double *target) {
     return C_OK;
 }
 
-int getDoubleFromObjectOrReply(client *c, robj *o, double *target, const char *msg) {
-    double value;
-    if (getDoubleFromObject(o, &value) != C_OK) {
-        if (msg != NULL) {
-            addReplyError(c,(char*)msg);
-        } else {
-            addReplyError(c,"value is not a valid float");
-        }
-        return C_ERR;
-    }
-    *target = value;
-    return C_OK;
-}
-
 int getLongDoubleFromObject(robj *o, long double *target) {
     long double value;
 
     if (o == NULL) {
         value = 0;
     } else {
-        serverAssertWithInfo(NULL,o,o->type == OBJ_STRING);
+        serverAssertWithInfo(o,o->type == OBJ_STRING);
         if (sdsEncodedObject(o)) {
             if (!string2ld(o->ptr, sdslen(o->ptr), &value))
                 return C_ERR;
@@ -667,27 +646,13 @@ int getLongDoubleFromObject(robj *o, long double *target) {
     return C_OK;
 }
 
-int getLongDoubleFromObjectOrReply(client *c, robj *o, long double *target, const char *msg) {
-    long double value;
-    if (getLongDoubleFromObject(o, &value) != C_OK) {
-        if (msg != NULL) {
-            addReplyError(c,(char*)msg);
-        } else {
-            addReplyError(c,"value is not a valid float");
-        }
-        return C_ERR;
-    }
-    *target = value;
-    return C_OK;
-}
-
 int getLongLongFromObject(robj *o, long long *target) {
     long long value;
 
     if (o == NULL) {
         value = 0;
     } else {
-        serverAssertWithInfo(NULL,o,o->type == OBJ_STRING);
+        serverAssertWithInfo(o,o->type == OBJ_STRING);
         if (sdsEncodedObject(o)) {
             if (string2ll(o->ptr,sdslen(o->ptr),&value) == 0) return C_ERR;
         } else if (o->encoding == OBJ_ENCODING_INT) {
@@ -697,36 +662,6 @@ int getLongLongFromObject(robj *o, long long *target) {
         }
     }
     if (target) *target = value;
-    return C_OK;
-}
-
-int getLongLongFromObjectOrReply(client *c, robj *o, long long *target, const char *msg) {
-    long long value;
-    if (getLongLongFromObject(o, &value) != C_OK) {
-        if (msg != NULL) {
-            addReplyError(c,(char*)msg);
-        } else {
-            addReplyError(c,"value is not an integer or out of range");
-        }
-        return C_ERR;
-    }
-    *target = value;
-    return C_OK;
-}
-
-int getLongFromObjectOrReply(client *c, robj *o, long *target, const char *msg) {
-    long long value;
-
-    if (getLongLongFromObjectOrReply(c, o, &value, msg) != C_OK) return C_ERR;
-    if (value < LONG_MIN || value > LONG_MAX) {
-        if (msg != NULL) {
-            addReplyError(c,(char*)msg);
-        } else {
-            addReplyError(c,"value is out of range");
-        }
-        return C_ERR;
-    }
-    *target = value;
     return C_OK;
 }
 
@@ -926,14 +861,6 @@ size_t objectComputeSize(robj *o, size_t sample_size) {
             }
             raxStop(&ri);
         }
-    } else if (o->type == OBJ_MODULE) {
-        moduleValue *mv = o->ptr;
-        moduleType *mt = mv->type;
-        if (mt->mem_usage != NULL) {
-            asize = mt->mem_usage(mv->value);
-        } else {
-            asize = 0;
-        }
     } else {
         serverPanic("Unknown object type");
     }
@@ -977,42 +904,7 @@ struct redisMemOverhead *getMemoryOverheadData(void) {
         server.cron_malloc_stats.process_rss - server.cron_malloc_stats.allocator_resident;
 
     mem_total += server.initial_memory_usage;
-
-    mem = 0;
-    if (server.repl_backlog)
-        mem += zmalloc_size(server.repl_backlog);
-    mh->repl_backlog = mem;
     mem_total += mem;
-
-    /* Computing the memory used by the clients would be O(N) if done
-     * here online. We use our values computed incrementally by
-     * clientsCronTrackClientsMemUsage(). */
-    mh->clients_slaves = server.stat_clients_type_memory[CLIENT_TYPE_SLAVE];
-    mh->clients_normal = server.stat_clients_type_memory[CLIENT_TYPE_MASTER]+
-                         server.stat_clients_type_memory[CLIENT_TYPE_PUBSUB]+
-                         server.stat_clients_type_memory[CLIENT_TYPE_NORMAL];
-    mem_total += mh->clients_slaves;
-    mem_total += mh->clients_normal;
-
-    mem = 0;
-    if (server.aof_state != AOF_OFF) {
-        mem += sdsZmallocSize(server.aof_buf);
-        mem += aofRewriteBufferSize();
-    }
-    mh->aof_buffer = mem;
-    mem_total+=mem;
-
-    mem = server.lua_scripts_mem;
-    mem += dictSize(server.lua_scripts) * sizeof(dictEntry) +
-        dictSlots(server.lua_scripts) * sizeof(dictEntry*);
-    mem += dictSize(server.repl_scriptcache_dict) * sizeof(dictEntry) +
-        dictSlots(server.repl_scriptcache_dict) * sizeof(dictEntry*);
-    if (listLength(server.repl_scriptcache_fifo) > 0) {
-        mem += listLength(server.repl_scriptcache_fifo) * (sizeof(listNode) + 
-            sdsZmallocSize(listNodeValue(listFirst(server.repl_scriptcache_fifo))));
-    }
-    mh->lua_caches = mem;
-    mem_total+=mem;
 
     for (j = 0; j < server.dbnum; j++) {
         redisDb *db = server.db+j;
@@ -1108,26 +1000,6 @@ sds getMemoryDoctorReport(void) {
             high_proc_rss = 1;
             num_reports++;
         }
-
-        /* Clients using more than 200k each average? */
-        long numslaves = listLength(server.slaves);
-        long numclients = listLength(server.clients)-numslaves;
-        if (mh->clients_normal / numclients > (1024*200)) {
-            big_client_buf = 1;
-            num_reports++;
-        }
-
-        /* Slaves using more than 10 MB each? */
-        if (numslaves > 0 && mh->clients_slaves / numslaves > (1024*1024*10)) {
-            big_slave_buf = 1;
-            num_reports++;
-        }
-
-        /* Too many scripts are cached? */
-        if (dictSize(server.lua_scripts) > 1000) {
-            many_scripts = 1;
-            num_reports++;
-        }
     }
 
     sds s;
@@ -1208,226 +1080,3 @@ int objectSetLRUOrLFU(robj *val, long long lfu_freq, long long lru_idle,
 }
 
 /* ======================= The OBJECT and MEMORY commands =================== */
-
-/* This is a helper function for the OBJECT command. We need to lookup keys
- * without any modification of LRU or other parameters. */
-robj *objectCommandLookup(client *c, robj *key) {
-    dictEntry *de;
-
-    if ((de = dictFind(c->db->dict,key->ptr)) == NULL) return NULL;
-    return (robj*) dictGetVal(de);
-}
-
-robj *objectCommandLookupOrReply(client *c, robj *key, robj *reply) {
-    robj *o = objectCommandLookup(c,key);
-
-    if (!o) addReply(c, reply);
-    return o;
-}
-
-/* Object command allows to inspect the internals of a Redis Object.
- * Usage: OBJECT <refcount|encoding|idletime|freq> <key> */
-void objectCommand(client *c) {
-    robj *o;
-
-    if (c->argc == 2 && !strcasecmp(c->argv[1]->ptr,"help")) {
-        const char *help[] = {
-"ENCODING <key> -- Return the kind of internal representation used in order to store the value associated with a key.",
-"FREQ <key> -- Return the access frequency index of the key. The returned integer is proportional to the logarithm of the recent access frequency of the key.",
-"IDLETIME <key> -- Return the idle time of the key, that is the approximated number of seconds elapsed since the last access to the key.",
-"REFCOUNT <key> -- Return the number of references of the value associated with the specified key.",
-NULL
-        };
-        addReplyHelp(c, help);
-    } else if (!strcasecmp(c->argv[1]->ptr,"refcount") && c->argc == 3) {
-        if ((o = objectCommandLookupOrReply(c,c->argv[2],shared.null[c->resp]))
-                == NULL) return;
-        addReplyLongLong(c,o->refcount);
-    } else if (!strcasecmp(c->argv[1]->ptr,"encoding") && c->argc == 3) {
-        if ((o = objectCommandLookupOrReply(c,c->argv[2],shared.null[c->resp]))
-                == NULL) return;
-        addReplyBulkCString(c,strEncoding(o->encoding));
-    } else if (!strcasecmp(c->argv[1]->ptr,"idletime") && c->argc == 3) {
-        if ((o = objectCommandLookupOrReply(c,c->argv[2],shared.null[c->resp]))
-                == NULL) return;
-        if (server.maxmemory_policy & MAXMEMORY_FLAG_LFU) {
-            addReplyError(c,"An LFU maxmemory policy is selected, idle time not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust.");
-            return;
-        }
-        addReplyLongLong(c,estimateObjectIdleTime(o)/1000);
-    } else if (!strcasecmp(c->argv[1]->ptr,"freq") && c->argc == 3) {
-        if ((o = objectCommandLookupOrReply(c,c->argv[2],shared.null[c->resp]))
-                == NULL) return;
-        if (!(server.maxmemory_policy & MAXMEMORY_FLAG_LFU)) {
-            addReplyError(c,"An LFU maxmemory policy is not selected, access frequency not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust.");
-            return;
-        }
-        /* LFUDecrAndReturn should be called
-         * in case of the key has not been accessed for a long time,
-         * because we update the access time only
-         * when the key is read or overwritten. */
-        addReplyLongLong(c,LFUDecrAndReturn(o));
-    } else {
-        addReplySubcommandSyntaxError(c);
-    }
-}
-
-/* The memory command will eventually be a complete interface for the
- * memory introspection capabilities of Redis.
- *
- * Usage: MEMORY usage <key> */
-void memoryCommand(client *c) {
-    if (!strcasecmp(c->argv[1]->ptr,"help") && c->argc == 2) {
-        const char *help[] = {
-"DOCTOR - Return memory problems reports.",
-"MALLOC-STATS -- Return internal statistics report from the memory allocator.",
-"PURGE -- Attempt to purge dirty pages for reclamation by the allocator.",
-"STATS -- Return information about the memory usage of the server.",
-"USAGE <key> [SAMPLES <count>] -- Return memory in bytes used by <key> and its value. Nested values are sampled up to <count> times (default: 5).",
-NULL
-        };
-        addReplyHelp(c, help);
-    } else if (!strcasecmp(c->argv[1]->ptr,"usage") && c->argc >= 3) {
-        dictEntry *de;
-        long long samples = OBJ_COMPUTE_SIZE_DEF_SAMPLES;
-        for (int j = 3; j < c->argc; j++) {
-            if (!strcasecmp(c->argv[j]->ptr,"samples") &&
-                j+1 < c->argc)
-            {
-                if (getLongLongFromObjectOrReply(c,c->argv[j+1],&samples,NULL)
-                     == C_ERR) return;
-                if (samples < 0) {
-                    addReply(c,shared.syntaxerr);
-                    return;
-                }
-                if (samples == 0) samples = LLONG_MAX;
-                j++; /* skip option argument. */
-            } else {
-                addReply(c,shared.syntaxerr);
-                return;
-            }
-        }
-        if ((de = dictFind(c->db->dict,c->argv[2]->ptr)) == NULL) {
-            addReplyNull(c);
-            return;
-        }
-        size_t usage = objectComputeSize(dictGetVal(de),samples);
-        usage += sdsZmallocSize(dictGetKey(de));
-        usage += sizeof(dictEntry);
-        addReplyLongLong(c,usage);
-    } else if (!strcasecmp(c->argv[1]->ptr,"stats") && c->argc == 2) {
-        struct redisMemOverhead *mh = getMemoryOverheadData();
-
-        addReplyMapLen(c,25+mh->num_dbs);
-
-        addReplyBulkCString(c,"peak.allocated");
-        addReplyLongLong(c,mh->peak_allocated);
-
-        addReplyBulkCString(c,"total.allocated");
-        addReplyLongLong(c,mh->total_allocated);
-
-        addReplyBulkCString(c,"startup.allocated");
-        addReplyLongLong(c,mh->startup_allocated);
-
-        addReplyBulkCString(c,"replication.backlog");
-        addReplyLongLong(c,mh->repl_backlog);
-
-        addReplyBulkCString(c,"clients.slaves");
-        addReplyLongLong(c,mh->clients_slaves);
-
-        addReplyBulkCString(c,"clients.normal");
-        addReplyLongLong(c,mh->clients_normal);
-
-        addReplyBulkCString(c,"aof.buffer");
-        addReplyLongLong(c,mh->aof_buffer);
-
-        addReplyBulkCString(c,"lua.caches");
-        addReplyLongLong(c,mh->lua_caches);
-
-        for (size_t j = 0; j < mh->num_dbs; j++) {
-            char dbname[32];
-            snprintf(dbname,sizeof(dbname),"db.%zd",mh->db[j].dbid);
-            addReplyBulkCString(c,dbname);
-            addReplyMapLen(c,2);
-
-            addReplyBulkCString(c,"overhead.hashtable.main");
-            addReplyLongLong(c,mh->db[j].overhead_ht_main);
-
-            addReplyBulkCString(c,"overhead.hashtable.expires");
-            addReplyLongLong(c,mh->db[j].overhead_ht_expires);
-        }
-
-        addReplyBulkCString(c,"overhead.total");
-        addReplyLongLong(c,mh->overhead_total);
-
-        addReplyBulkCString(c,"keys.count");
-        addReplyLongLong(c,mh->total_keys);
-
-        addReplyBulkCString(c,"keys.bytes-per-key");
-        addReplyLongLong(c,mh->bytes_per_key);
-
-        addReplyBulkCString(c,"dataset.bytes");
-        addReplyLongLong(c,mh->dataset);
-
-        addReplyBulkCString(c,"dataset.percentage");
-        addReplyDouble(c,mh->dataset_perc);
-
-        addReplyBulkCString(c,"peak.percentage");
-        addReplyDouble(c,mh->peak_perc);
-
-        addReplyBulkCString(c,"allocator.allocated");
-        addReplyLongLong(c,server.cron_malloc_stats.allocator_allocated);
-
-        addReplyBulkCString(c,"allocator.active");
-        addReplyLongLong(c,server.cron_malloc_stats.allocator_active);
-
-        addReplyBulkCString(c,"allocator.resident");
-        addReplyLongLong(c,server.cron_malloc_stats.allocator_resident);
-
-        addReplyBulkCString(c,"allocator-fragmentation.ratio");
-        addReplyDouble(c,mh->allocator_frag);
-
-        addReplyBulkCString(c,"allocator-fragmentation.bytes");
-        addReplyLongLong(c,mh->allocator_frag_bytes);
-
-        addReplyBulkCString(c,"allocator-rss.ratio");
-        addReplyDouble(c,mh->allocator_rss);
-
-        addReplyBulkCString(c,"allocator-rss.bytes");
-        addReplyLongLong(c,mh->allocator_rss_bytes);
-
-        addReplyBulkCString(c,"rss-overhead.ratio");
-        addReplyDouble(c,mh->rss_extra);
-
-        addReplyBulkCString(c,"rss-overhead.bytes");
-        addReplyLongLong(c,mh->rss_extra_bytes);
-
-        addReplyBulkCString(c,"fragmentation"); /* this is the total RSS overhead, including fragmentation */
-        addReplyDouble(c,mh->total_frag); /* it is kept here for backwards compatibility */
-
-        addReplyBulkCString(c,"fragmentation.bytes");
-        addReplyLongLong(c,mh->total_frag_bytes);
-
-        freeMemoryOverheadData(mh);
-    } else if (!strcasecmp(c->argv[1]->ptr,"malloc-stats") && c->argc == 2) {
-#if defined(USE_JEMALLOC)
-        sds info = sdsempty();
-        je_malloc_stats_print(inputCatSds, &info, NULL);
-        addReplyVerbatim(c,info,sdslen(info),"txt");
-        sdsfree(info);
-#else
-        addReplyBulkCString(c,"Stats not supported for the current allocator");
-#endif
-    } else if (!strcasecmp(c->argv[1]->ptr,"doctor") && c->argc == 2) {
-        sds report = getMemoryDoctorReport();
-        addReplyVerbatim(c,report,sdslen(report),"txt");
-        sdsfree(report);
-    } else if (!strcasecmp(c->argv[1]->ptr,"purge") && c->argc == 2) {
-        if (jemalloc_purge() == 0)
-            addReply(c, shared.ok);
-        else
-            addReplyError(c, "Error purging dirty pages");
-    } else {
-        addReplyErrorFormat(c, "Unknown subcommand or wrong number of arguments for '%s'. Try MEMORY HELP", (char*)c->argv[1]->ptr);
-    }
-}

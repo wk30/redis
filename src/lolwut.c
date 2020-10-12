@@ -33,56 +33,11 @@
  * each new version of Redis.
  */
 
-#include "server.h"
 #include "lolwut.h"
+#include "zmalloc.h"
 #include <math.h>
-
-void lolwut5Command(client *c);
-void lolwut6Command(client *c);
-
-/* The default target for LOLWUT if no matching version was found.
- * This is what unstable versions of Redis will display. */
-void lolwutUnstableCommand(client *c) {
-    sds rendered = sdsnew("Redis ver. ");
-    rendered = sdscat(rendered,REDIS_VERSION);
-    rendered = sdscatlen(rendered,"\n",1);
-    addReplyVerbatim(c,rendered,sdslen(rendered),"txt");
-    sdsfree(rendered);
-}
-
-/* LOLWUT [VERSION <version>] [... version specific arguments ...] */
-void lolwutCommand(client *c) {
-    char *v = REDIS_VERSION;
-    char verstr[64];
-
-    if (c->argc >= 3 && !strcasecmp(c->argv[1]->ptr,"version")) {
-        long ver;
-        if (getLongFromObjectOrReply(c,c->argv[2],&ver,NULL) != C_OK) return;
-        snprintf(verstr,sizeof(verstr),"%u.0.0",(unsigned int)ver);
-        v = verstr;
-
-        /* Adjust argv/argc to filter the "VERSION ..." option, since the
-         * specific LOLWUT version implementations don't know about it
-         * and expect their arguments. */
-        c->argv += 2;
-        c->argc -= 2;
-    }
-
-    if ((v[0] == '5' && v[1] == '.' && v[2] != '9') ||
-        (v[0] == '4' && v[1] == '.' && v[2] == '9'))
-        lolwut5Command(c);
-    else if ((v[0] == '6' && v[1] == '.' && v[2] != '9') ||
-             (v[0] == '5' && v[1] == '.' && v[2] == '9'))
-        lolwut6Command(c);
-    else
-        lolwutUnstableCommand(c);
-
-    /* Fix back argc/argv in case of VERSION argument. */
-    if (v == verstr) {
-        c->argv -= 2;
-        c->argc += 2;
-    }
-}
+#include <string.h>
+#include <stdlib.h>
 
 /* ========================== LOLWUT Canvase ===============================
  * Many LOLWUT versions will likely print some computer art to the screen.
@@ -144,6 +99,10 @@ void lwDrawLine(lwCanvas *canvas, int x1, int y1, int x2, int y2, int color) {
         }
     }
 }
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 /* Draw a square centered at the specified x,y coordinates, with the specified
  * rotation angle and size. In order to write a rotated square, we use the

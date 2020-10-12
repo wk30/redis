@@ -30,6 +30,8 @@
 #ifndef __SPARKLINE_H
 #define __SPARKLINE_H
 
+#include "sds.h"
+
 /* A sequence is represented of many "samples" */
 struct sample {
     double value;

@@ -29,6 +29,7 @@
 
 #ifndef __BIO_H
 #define __BIO_H
+#include <time.h>
 
 /* Exported API */
 void bioInit(void);

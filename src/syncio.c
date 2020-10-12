@@ -28,7 +28,9 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "server.h"
+#include "redis.h"
+#include "ae.h"
+#include <errno.h>
 
 /* ----------------- Blocking sockets I/O with timeouts --------------------- */
 
