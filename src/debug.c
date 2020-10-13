@@ -40,10 +40,9 @@
 #include "ziplist.h"
 
 #include <arpa/inet.h>
-#include <signal.h>
-#include <dlfcn.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1139,6 +1138,9 @@ void doFastMemoryTest(void) {
 #endif /* HAVE_PROC_MAPS */
 }
 
+#ifdef HAVE_BACKTRACE
+#include <dlfcn.h>
+
 /* Scans the (assumed) x86 code starting at addr, for a max of `len`
  * bytes, searching for E8 (callq) opcodes, and dumping the symbols
  * and the call offset if they appear to be valid. */
@@ -1194,6 +1196,7 @@ void dumpCodeAroundEIP(void *eip) {
         }
     }
 }
+#endif
 
 void sigsegvHandler(int sig, siginfo_t *info, void *secret) {
     UNUSED(secret);

@@ -230,6 +230,7 @@ else
 endif
 endif
 
+REDIS_AR=$(QUIET_LINK)$(AR) $(ARFLAGS)
 REDIS_CC=$(QUIET_CC)$(CC) $(FINAL_CFLAGS)
 REDIS_LD=$(QUIET_LINK)$(CC) $(FINAL_LDFLAGS)
 REDIS_INSTALL=$(QUIET_INSTALL)$(INSTALL)
@@ -247,15 +248,33 @@ QUIET_LINK = @printf '    %b %b\n' $(LINKCOLOR)LINK$(ENDCOLOR) $(BINCOLOR)$@$(EN
 QUIET_INSTALL = @printf '    %b %b\n' $(LINKCOLOR)INSTALL$(ENDCOLOR) $(BINCOLOR)$@$(ENDCOLOR) 1>&2;
 endif
 
-REDIS_SERVER_OBJ=adlist.o quicklist.o ae.o anet.o dict.o sds.o zmalloc.o lzf_c.o lzf_d.o pqsort.o zipmap.o sha1.o ziplist.o util.o \
+REDIS_OBJ=adlist.o quicklist.o ae.o anet.o dict.o sds.o zmalloc.o lzf_c.o lzf_d.o pqsort.o zipmap.o sha1.o ziplist.o util.o \
 intset.o crc16.o endianconv.o rand.o memtest.o crcspeed.o crc64.o setproctitle.o \
 geohash.o geohash_helper.o siphash.o rax.o listpack.o localtime.o \
 sha256.o setcpuaffinity.o monotonic.o defrag.o \
 object.o sort.o syncio.o bio.o rio.o hyperloglog.o latency.o sparkline.o geo.o lazyfree.o \
 lolwut.o lolwut5.o lolwut6.o connection.o tls.o debug.o evict.o redis.o \
-t_hash.o t_list.o t_set.o t_stream.o t_zset.o db.o
+t_hash.o t_list.o t_set.o t_stream.o t_zset.o t_string.o db.o
 
-all: $(REDIS_SERVER_OBJ)
+LIBNAME=libredis
+STLIBSUFFIX=a
+STLIBNAME=$(LIBNAME).$(STLIBSUFFIX)
+
+DYLIBSUFFIX=so
+DYLIBVERSION=$(shell grep REDIS_VERSION version.h | awk '{print $$3}')
+DYLIBNAME=$(LIBNAME).$(DYLIBSUFFIX).$(DYLIBVERSION)
+
+# $(CC) -shared -Wl,-soname,$(DYLIB_VERSION) -o $(DYLIBNAME) $(REDIS_OBJ) $(REAL_LDFLAGS)
+$(DYLIBNAME): $(REDIS_OBJ)
+	$(REDIS_CC) -shared -Wl,-soname -o $@ $^ $(FINAL_LIBS)
+
+$(STLIBNAME): $(REDIS_OBJ)
+	$(REDIS_AR) $@ $^
+
+dynamic: $(DYLIBNAME)
+static: $(STLIBNAME)
+
+all: $(REDIS_OBJ)
 	@echo ""
 	@echo "Hint: It's a good idea to run 'make test' ;)"
 	@echo ""
@@ -301,7 +320,7 @@ endif
 dict-benchmark: dict.c zmalloc.c sds.c siphash.c
 	$(REDIS_CC) $(FINAL_CFLAGS) $^ -D DICT_BENCHMARK_MAIN -o $@ $(FINAL_LIBS)
 
-DEP = $(REDIS_SERVER_OBJ:%.o=%.d)
+DEP = $(REDIS_OBJ:%.o=%.d)
 -include $(DEP)
 
 # Because the jemalloc.h header is generated as a part of the jemalloc build,

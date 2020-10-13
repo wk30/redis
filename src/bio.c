@@ -173,8 +173,6 @@ void *bioProcessBackgroundJobs(void *arg) {
         break;
     }
 
-    redisSetCpuAffinity(server.bio_cpulist);
-
     pthread_mutex_lock(&bio_mutex[type]);
     /* Block SIGALRM so we are sure that only the main thread will
      * receive the watchdog signal. */

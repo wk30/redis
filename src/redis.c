@@ -33,6 +33,7 @@
 #include "latency.h"
 #include "atomicvar.h"
 #include "object.h"
+#include "rand.h"
 #include "zmalloc.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -49,6 +50,9 @@ struct sharedObjectsStruct shared;
  * at runtime to avoid strange compiler optimizations. */
 
 double R_Zero, R_PosInf, R_NegInf, R_Nan;
+
+/* OOM Score defaults */
+int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT] = { 0, 200, 800 };
 
 /*================================= Globals ================================= */
 
@@ -143,18 +147,6 @@ void serverLogFromHandler(int level, const char *msg) {
     if (write(fd,"\n",1) == -1) goto err;
 err:
     if (!log_to_stdout) close(fd);
-}
-
-/* After an RDB dump or AOF rewrite we exit from children using _exit() instead of
- * exit(), because the latter may interact with the same file objects used by
- * the parent process. However if we are testing the coverage normal exit() is
- * used in order to obtain the right coverage information. */
-void exitFromChild(int retcode) {
-#ifdef COVERAGE_TEST
-    exit(retcode);
-#else
-    _exit(retcode);
-#endif
 }
 
 /*====================== Hash table type implementation  ==================== */
@@ -792,7 +784,7 @@ void createSharedObjects(void) {
     shared.maxstring = sdsnew("maxstring");
 }
 
-void initServerConfig(void) {
+void initServerConfig(int dbnum, FILE *logfp) {
     int j;
 
     updateCachedTime(1);
@@ -826,10 +818,25 @@ void initServerConfig(void) {
 
     /* Debugging */
     server.watchdog_period = 0;
+    server.dirty = 0;
+    
+    server.dbnum = dbnum;
+    server.logfp = logfp;
 }
 
-void initServerLogFp(FILE *fp) {
-    server.logfp = fp;
+redisDb *getDb(robj *key) {
+    uint64_t hashval = 0, idx = 0;
+
+    hashval = dictObjHash(key);
+    idx = hashval & (server.dbnum - 1);
+    
+    return &server.db[idx];
+}
+
+redisDb *getRandomDb() {
+    int idx = redisRandInRange(0, server.dbnum);
+
+    return &server.db[idx];
 }
 
 extern char **environ;
@@ -930,6 +937,11 @@ void resetServerStats(void) {
     atomicSet(server.stat_net_output_bytes, 0);
     server.stat_unexpected_error_replies = 0;
     server.blocked_last_cron = 0;
+    server.dirty = 0;
+}
+
+void incrKeynum(void) {
+    server.dirty++;
 }
 
 /* Make the thread killable at any time, so that kill threads functions
@@ -975,6 +987,7 @@ void initServer(void) {
         server.db[j].id = j;
         server.db[j].avg_ttl = 0;
         server.db[j].defrag_later = listCreate();
+        pthread_rwlock_init(&server.db[j].rwlock, NULL);
         listSetFreeMethod(server.db[j].defrag_later,(void (*)(void*))sdsfree);
     }
     evictionPoolAlloc(); /* Initialize the LRU keys pool. */

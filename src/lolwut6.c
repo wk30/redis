@@ -45,7 +45,7 @@
 
 /* Render the canvas using the four gray levels of the standard color
  * terminal: they match very well to the grayscale display of the gameboy. */
-sds renderCanvas(lwCanvas *canvas) {
+static sds renderCanvas(lwCanvas *canvas) {
     sds text = sdsempty();
     for (int y = 0; y < canvas->height; y++) {
         for (int x = 0; x < canvas->width; x++) {

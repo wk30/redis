@@ -41,7 +41,8 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <stdint.h>
+#include "rand.h"
+#include <stdlib.h>
 
 #define N	16
 #define MASK	((1 << (N - 1)) + (1 << (N - 1)) - 1)
@@ -75,6 +76,10 @@ int32_t redisLrand48() {
 
 void redisSrand48(int32_t seedval) {
     SEED(X0, LOW(seedval), HIGH(seedval));
+}
+
+int redisRandInRange(int min, int max) {
+   return min + rand() / (RAND_MAX / (max - min + 1) + 1);
 }
 
 static void next(void) {

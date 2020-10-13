@@ -40,6 +40,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <stdio.h>
+#include <pthread.h>
 
 #include "dict.h"    /* Hash tables */
 #include "adlist.h"  /* Linked lists */
@@ -289,6 +290,7 @@ typedef struct redisDb {
     long long avg_ttl;          /* Average TTL, just for stats */
     unsigned long expires_cursor; /* Cursor of the active expire cycle. */
     list *defrag_later;         /* List of key names to attempt to defrag one by one, gradually. */
+    pthread_rwlock_t rwlock;    /* Support multiple threads for user themself */
 } redisDb;
 
 struct sharedObjectsStruct {
@@ -517,9 +519,9 @@ struct redisServer {
     int watchdog_period;  /* Software watchdog period in ms. 0 = off */
     /* System hardware info */
     size_t system_memory_size;  /* Total memory in system as reported by OS */
-    /* cpu affinity */
-    // char *server_cpulist; /* cpu affinity list of redis server main/io thread. */
-    char *bio_cpulist; /* cpu affinity list of bio thread. */
+
+    /* persistence */
+    long long dirty;                /* Changes to DB from the last save */
 };
 
 struct redisFunctionSym {
@@ -605,9 +607,11 @@ ssize_t syncRead(int fd, char *ptr, ssize_t size, long long timeout);
 ssize_t syncReadLine(int fd, char *ptr, ssize_t size, long long timeout);
 
 /* Core functions */
-void initServerConfig(void);
-void initServerLogFp(FILE *fp);
+void initServerConfig(int dbnum, FILE *logfp);
+redisDb *getDb(robj *key);
+redisDb *getRandomDb(void);
 void initServer(void);
+void incrKeynum(void);
 int getMaxmemoryState(size_t *total, size_t *logical, size_t *tofree, float *level);
 void redisOpArrayInit(redisOpArray *oa);
 void redisOpArrayFree(redisOpArray *oa);

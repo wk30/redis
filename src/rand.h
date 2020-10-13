@@ -30,8 +30,11 @@
 #ifndef REDIS_RANDOM_H
 #define REDIS_RANDOM_H
 
+#include <stdint.h>
+
 int32_t redisLrand48();
 void redisSrand48(int32_t seedval);
+int redisRandInRange(int min, int max);
 
 #define REDIS_LRAND48_MAX INT32_MAX
 
